@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { state } from '../hooks/state'
 
-import { htmlArgv, htmlOpenArgv, isPage, noticeOf, renderPage } from '../hooks/media'
+import { htmlArgv, htmlOpenArgv, imageBlocks, isPage, noticeOf, renderPage } from '../hooks/media'
 
 test('a page is an html file, and only that', () => {
   expect(isPage('/tmp/report.html')).toBe(true)
@@ -65,4 +65,21 @@ test('a page that cannot be rendered falls back to a screenshot shown with show_
     expect(n.message).toContain('Playwright')
     expect(n.message).toContain('show_image')
   }
+})
+
+test('a path that is really image data is not echoed back in the notice', () => {
+  const data = `iVBORw0KGgo${'A'.repeat(5000)}`
+  const n = noticeOf(new Error(`not an image: ${data}`), data)
+  for (const text of [n.message, n.text, n.prompt ?? '']) expect(text.length).toBeLessThan(600)
+  expect(n.message).toContain('5011 characters')
+})
+
+test('image blocks are found by shape in any tool result, and only real pictures', () => {
+  const png = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } }
+  const jpg = { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/4AAQ' } }
+  expect(imageBlocks([{ type: 'text', text: 'x' }, png, jpg]).map(b => b.ext)).toEqual(['png', 'jpg'])
+  expect(imageBlocks([{ type: 'image', source: { type: 'url', url: 'https://x/y.png' } }])).toEqual([])
+  expect(imageBlocks([{ type: 'image', source: { type: 'base64', media_type: 'image/svg+xml', data: 'AAAA' } }])).toEqual([])
+  expect(imageBlocks('a string result')).toEqual([])
+  expect(imageBlocks(Array.from({ length: 20 }, () => png), 12).length).toBe(12)
 })

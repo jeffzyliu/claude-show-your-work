@@ -81,7 +81,7 @@ The `sh -c` scripts (`SHRINK_SH`, `TRIM_SH`, `HISTORY_TRIM_SH`, `MOVE_SH`) are t
 The tests can't see whether a picture draws. Check visual changes in a normal Ghostty tab with the local copy:
 
 ```
-claude --plugin-dir ~/claude-mods/claude-show-your-work --settings '{"enabledPlugins":{"show-your-work@iamumeransari":false}}'
+claude --plugin-dir ~/claude-mods/claude-show-your-work --settings '{"enabledPlugins":{"show-your-work@jeffzyliu":false}}'
 ```
 
 - A plain `claude` loads the **installed** copy from GitHub, not the local one.

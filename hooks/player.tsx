@@ -7,7 +7,6 @@ import type { Check, KeyChange, Shown, Summary } from '../types'
 import { settings, state } from './state'
 import { clock, drawBox, layoutOf, oneLine, pagesOf, pixelsFor, PX_MAX, remeasure, SIDE, SIDEBAR, sizeFor, sizeStep, tabLabel, targetBox, wrapWords } from './layout'
 import { debug, event, isWiderThanBox, problem } from './diagnostics'
-import { act, track } from './telemetry'
 import { compareFrame, frameFile, frameReady, htmlOpenArgv, rawSizeOf, SKIP_SECONDS, identityOf, isFrameCut, isGone, isRunCut, keyOf, MAX_STILL, PAIR_GAP, pairReady, pngSize, prepareVideo, readsAnyFile, BYTES_MAX, recutFrame, rescaleVideo, toOriginal, toUpdated } from './media'
 import { prepared, preparedOf } from './history'
 import { docPage, documentView } from './document'
@@ -25,6 +24,8 @@ type Player = {
   isSplit?: boolean
   // which earlier version the compared side is, when there are several
   step?: number
+  // which picture of a carousel is on screen
+  pick?: number
   // the sidebar lists the versions instead of what changed
   isHistory?: boolean
   // scrolled out of view since it was last drawn
@@ -108,6 +109,12 @@ export function openFailure(r: { exitCode: number; stderr: string }, what: strin
 // The narrowest the scrub and button rows get, in columns: room for the play
 // button, both times, a usable bar and the action buttons on one line.
 const CONTROLS_MIN = 64
+// A row's pictures share one height (never under ROW_MIN_ROWS unless one per
+// line is smaller) and take the width their shape gives, at least ROW_CELL_MIN
+// columns so the three buttons fit; ROW_GAP columns between them.
+const ROW_CELL_MIN = 26
+const ROW_MIN_ROWS = 10
+const ROW_GAP = 2
 // Page buttons, the count and the actions on one line: about 78 columns.
 const DOC_CONTROLS_MIN = 80
 
@@ -148,7 +155,8 @@ function syncCopy(site: string, m: Shown | undefined) {
   const copy = m && chosen.get(`${site}|${copyKey(m)}`)
   if (m && copy && copy.path !== m.path) Object.assign(m, copy)
 }
-function fitCopy($: EngineInterface, site: string, m: Shown, need: number) {
+// `isNative`: a row's or carousel's picture is never made bigger than it is.
+function fitCopy($: EngineInterface, site: string, m: Shown, need: number, isNative = false) {
   const key = copyKey(m)
   let made = copies.get(key)
   if (!made) copies.set(key, (made = new Map()))
@@ -162,7 +170,7 @@ function fitCopy($: EngineInterface, site: string, m: Shown, need: number) {
   const best = made.get(isFitted ? bestCopy(widths, need)! : Math.max(...widths))!
   if (best.path !== m.path) Object.assign(m, best)
   chosen.set(`${site}|${key}`, best)
-  const limit = m.frames ? PX_MAX : Math.min(MAX_STILL, (m.sourceWidth ?? m.width) * 2 * sizeStep())
+  const limit = m.frames ? PX_MAX : isNative ? Math.min(MAX_STILL, m.sourceWidth ?? m.width) : Math.min(MAX_STILL, (m.sourceWidth ?? m.width) * 2 * sizeStep())
   const want = Math.min(limit, need)
   const width = isFitted ? Math.min(copyWidthFor(want), limit) : want
   const source = m.source
@@ -374,7 +382,6 @@ function probe($: EngineInterface, site: string, key: string, pic: Pic) {
     if (r.deny && /alt/i.test(r.deny)) {
       state.canImage = false
       state.drawCause = causeOf(state.inTmux, state.terminalName, state.isForced)
-      track('cannot_draw', { cause: state.drawCause })
       $.ui.toast("Pictures can't show here: see the notice in the chat.")
       redraw($)
     }
@@ -821,9 +828,9 @@ function PageButtons(ui: Ui, $: EngineInterface, site: string, media: Shown) {
     redraw($, site)
   }
   return [
-    pages.count > 1 && <Button key="prev" plain dimColor={at === 0} label="‹ Prev" onPress={() => { act('page_prev'); go(at - 1) }} />,
+    pages.count > 1 && <Button key="prev" plain dimColor={at === 0} label="‹ Prev" onPress={() => { go(at - 1) }} />,
     <Text key="page-count" dimColor>{`Page ${at + 1} of ${pages.count}`}</Text>,
-    pages.count > 1 && <Button key="next" plain dimColor={at >= pages.count - 1} label="Next ›" onPress={() => { act('page_next'); go(at + 1) }} />,
+    pages.count > 1 && <Button key="next" plain dimColor={at >= pages.count - 1} label="Next ›" onPress={() => { go(at + 1) }} />,
   ]
 }
 
@@ -844,7 +851,7 @@ function Scrub(ui: Ui, $: EngineInterface, site: string, media: Shown, width: nu
 
   return (
     <Box flexDirection="row" flexWrap="nowrap" width={width}>
-      <Button key="play" variant="primary" label={word} onPress={() => { act(word.includes('Pause') ? 'pause' : 'play'); if (!word.includes('Pause')) tourHeard($, 'play'); toggle($, site, media, shown) }} />
+      <Button key="play" variant="primary" label={word} onPress={() => { if (!word.includes('Pause')) tourHeard($, 'play'); toggle($, site, media, shown) }} />
       <Text dimColor> {elapsed} </Text>
       {chunks.map((c, i) => (
         <Button
@@ -852,7 +859,7 @@ function Scrub(ui: Ui, $: EngineInterface, site: string, media: Shown, width: nu
           plain
           dimColor={c.isAhead}
           label={c.label}
-          onPress={() => { act('scrub'); seek($, site, media, (Math.round((c.start / Math.max(1, segments - 1)) * (frames.count - 1)) + 0.5) / frames.fps, shown) }}
+          onPress={() => { seek($, site, media, (Math.round((c.start / Math.max(1, segments - 1)) * (frames.count - 1)) + 0.5) / frames.fps, shown) }}
         />
       ))}
       <Text dimColor> {total}</Text>
@@ -881,6 +888,11 @@ export function barChunks(segments: number, playhead: number, count = 20) {
 // before by default, with ‹ › to step further back. Versions are numbered
 // from the first one shown, so the updated side is the highest.
 export function atStep(shown: Shown, site: string): Shown {
+  if (shown.carousel?.length) {
+    const at = Math.min(player(site).pick ?? 0, shown.carousel.length - 1)
+    const { path, source, origin, width, height, sourceWidth, sourceHeight, title, generation } = shown.carousel[at]!
+    return { ...shown, path, source, origin, width, height, sourceWidth, sourceHeight, title, generation }
+  }
   const step = player(site).step
   const picked = step === undefined ? undefined : prepared.get(shown.history?.[step]?.path ?? '')
   return picked ? { ...shown, compare: picked } : shown
@@ -935,6 +947,7 @@ function TitleBar(ui: Ui, $: EngineInterface, site: string, shown: Shown, at: { 
       </Box>
       <Box flexDirection="row" gap={2} flexShrink={0}>
         {at.pr}
+        {shown.carousel && !shown.isRow && Carousel(ui, $, site, shown)}
         {Tabs(ui, $, site, shown)}
       </Box>
     </Box>
@@ -942,7 +955,30 @@ function TitleBar(ui: Ui, $: EngineInterface, site: string, shown: Shown, at: { 
 }
 
 // The tab row's width: each Button draws as "[ label ]", one apart.
+// A carousel's picker: ‹ 1 2 3 › for a few pictures, ‹ 3/12 › for many.
+const carouselLabels = (count: number) => (count <= 8 ? Array.from({ length: count }, (_, i) => String(i + 1)) : [])
+function Carousel(ui: Ui, $: EngineInterface, site: string, shown: Shown) {
+  const { Box, Button, Text } = ui
+  const count = shown.carousel!.length
+  const at = Math.min(player(site).pick ?? 0, count - 1)
+  const go = (to: number) => { player(site).pick = (to + count) % count; redraw($, site) }
+  const labels = carouselLabels(count)
+
+  return (
+    <Box key="carousel" flexDirection="row" gap={1}>
+      <Button key="carousel-prev" label="‹" onPress={() => go(at - 1)} />
+      {labels.length
+        ? labels.map((label, i) => <Button key={`carousel-${i}`} variant={i === at ? 'primary' : 'secondary'} label={label} onPress={() => go(i)} />)
+        : <Text dimColor>{at + 1}/{count}</Text>}
+      <Button key="carousel-next" label="›" onPress={() => go(at + 1)} />
+    </Box>
+  )
+}
 export function tabsWidth(shown: Shown) {
+  if (shown.carousel?.length && !shown.isRow) {
+    const labels = carouselLabels(shown.carousel.length)
+    return (labels.length ? labels.reduce((n, l) => n + l.length + 4, 0) : String(shown.carousel.length).length * 2 + 1) + 2 * 5 + labels.length + 2
+  }
   if (!shown.compare) return 0
   const labels = [tabLabel(shown.compare.label ?? 'Original'), tabLabel(shown.label ?? 'Updated')]
   if (shown.frames && shown.pair) labels.push('⧉ Compare')
@@ -976,12 +1012,12 @@ function Tabs(ui: Ui, $: EngineInterface, site: string, shown: Shown) {
 
   return (
     <Box flexDirection="row" gap={1}>
-      <Button key="side-before" variant={isCompare ? 'primary' : 'secondary'} label={tabLabel(shown.compare.label ?? 'Original')} onPress={() => { act('original'); tourHeard($, 'original'); restore(true) }} />
-      <Button key="side-after" variant={isUpdated ? 'primary' : 'secondary'} label={tabLabel(shown.label ?? 'Updated')} onPress={() => { act('updated'); restore(false) }} />
-      {canBoth && <Button key="side-both" variant={isBoth ? 'primary' : 'secondary'} label="⧉ Compare" onPress={() => { act('compare'); tourHeard($, 'compare'); restore(false); split($, site, shown, true) }} />}
+      <Button key="side-before" variant={isCompare ? 'primary' : 'secondary'} label={tabLabel(shown.compare.label ?? 'Original')} onPress={() => { tourHeard($, 'original'); restore(true) }} />
+      <Button key="side-after" variant={isUpdated ? 'primary' : 'secondary'} label={tabLabel(shown.label ?? 'Updated')} onPress={() => { restore(false) }} />
+      {canBoth && <Button key="side-both" variant={isBoth ? 'primary' : 'secondary'} label="⧉ Compare" onPress={() => { tourHeard($, 'compare'); restore(false); split($, site, shown, true) }} />}
       {hasSteps && (
         <Button key="history" variant={isHistory ? 'primary' : 'secondary'} label={`History · ${shown.history!.length + 1}`}
-          onPress={() => { if (isHistory) return restore(false); act('history'); one.isHistory = true; one.changesPage = 0; redraw($, site) }} />
+          onPress={() => { if (isHistory) return restore(false); one.isHistory = true; one.changesPage = 0; redraw($, site) }} />
       )}
     </Box>
   )
@@ -998,7 +1034,7 @@ function Changes(ui: Ui, $: EngineInterface, site: string, shown: Shown, fixed: 
       key={`${word}-${c.name}`}
       plain
       label={`${c.at !== undefined ? `${clock(c.at)} ` : ''}${word} · ${c.name}`}
-      onPress={() => { if (c.at === undefined) return; act('check_jump'); seek($, site, media, c.at, shown) }}
+      onPress={() => { if (c.at === undefined) return; seek($, site, media, c.at, shown) }}
     />
   )
 
@@ -1105,7 +1141,7 @@ function Report(ui: Ui, $: EngineInterface, site: string, shown: Shown, prLink: 
       {(pages[page] ?? []).map(({ c, n, lines }, k) => {
         const isLive = n === live
         // A change pauses on its moment, to be looked at; Play goes on from there.
-        const jump = () => { if (c.at === undefined) return; act('change_jump'); tourHeard($, 'change_jump'); stop($, site); seek($, site, media, onOriginal ? toOriginal(shown, c.at) : c.at, shown) }
+        const jump = () => { if (c.at === undefined) return; tourHeard($, 'change_jump'); stop($, site); seek($, site, media, onOriginal ? toOriginal(shown, c.at) : c.at, shown) }
         return (
           <Box key={`change-${n}`} flexDirection="row" gap={1} marginTop={k ? 1 : 0}>
             <Text color={isLive ? 'suggestion' : undefined} dimColor={!isLive}>{`${n + 1}.`.padStart(3)}</Text>
@@ -1154,7 +1190,7 @@ function Report(ui: Ui, $: EngineInterface, site: string, shown: Shown, prLink: 
             <Text color={isOn ? 'suggestion' : undefined} dimColor={!isOn}>{`${i + 1}.`.padStart(3)}</Text>
             <Box flexDirection="column" width={VERSION}>
               {lines.map((line, j) => (
-                <Button key={`version-${i}-${j}`} plain label={line} hover={{ inverse: true }} onPress={() => { act('version_pick'); tourHeard($, 'version_pick'); pickVersion($, site, shown, i) }} />
+                <Button key={`version-${i}-${j}`} plain label={line} hover={{ inverse: true }} onPress={() => { tourHeard($, 'version_pick'); pickVersion($, site, shown, i) }} />
               ))}
             </Box>
             {(isOn || isLatest) && (
@@ -1207,7 +1243,7 @@ export const isScratch = (path: string) => /^\/(private\/)?(tmp|var\/folders)\//
 
 // What you do with the file: watch it properly, keep it (or find it), or
 // paste its path elsewhere.
-function Actions(ui: Ui, $: EngineInterface, media: Shown, source: string, isNarrow: boolean) {
+function Actions(ui: Ui, $: EngineInterface, media: Shown, source: string, isNarrow: boolean, suffix = '', isShort = false) {
   const { Box, Button } = ui
   const done = (r: { exitCode: number; stderr: string }, note: string, what: string, path: string) =>
     $.ui.toast(r.exitCode === 0 ? note : openFailure(r, what, path))
@@ -1229,18 +1265,18 @@ function Actions(ui: Ui, $: EngineInterface, media: Shown, source: string, isNar
   return (
     <Box flexDirection="row" gap={2}>
       {!source.startsWith(`${state.home}/Downloads/`) ? (
-        <Button key="keep" plain dimColor label="Save to Downloads" onPress={() => { act('save'); void keep() }} />
+        <Button key={`keep${suffix}`} plain dimColor label={isShort ? 'Save' : 'Save to Downloads'} onPress={() => { void keep() }} />
       ) : (
-        <Button key="reveal" plain dimColor label={state.isMac ? 'Show in Finder' : 'Show in folder'} onPress={() => act('reveal') || void $.process.run(state.isMac ? ['open', '-R', source] : openArgv(source.slice(0, source.lastIndexOf('/')) || '/')).then(r => done(r, state.isMac ? 'Shown in Finder' : 'Opened the folder', 'folders', source))} />
+        <Button key={`reveal${suffix}`} plain dimColor label={isShort ? 'Show' : state.isMac ? 'Show in Finder' : 'Show in folder'} onPress={() => void $.process.run(state.isMac ? ['open', '-R', source] : openArgv(source.slice(0, source.lastIndexOf('/')) || '/')).then(r => done(r, state.isMac ? 'Shown in Finder' : 'Opened the folder', 'folders', source))} />
       )}
       {!isNarrow && (
         <Button
-          key="copy"
+          key={`copy${suffix}`}
           plain
           dimColor
           label="Copy path"
           onPress={(press: { surface: 'terminal' }) =>
-            act('copy_path') || void $.ui.copy({ text: source, surface: press.surface }).then(r => $.ui.toast(r.isCopied ? 'Path copied' : 'Could not copy the path'))
+            void $.ui.copy({ text: source, surface: press.surface }).then(r => $.ui.toast(r.isCopied ? 'Path copied' : 'Could not copy the path'))
           }
         />
       )}
@@ -1376,7 +1412,7 @@ export function terminalOf(env: { program: string; term: string; kitty: boolean;
 
 // The notice for a picture that couldn't draw, and the line Claude reads.
 // The README's list of terminals that draw pictures.
-const TERMINALS = 'https://github.com/iamumeransari/claude-show-your-work#terminals'
+const TERMINALS = 'https://github.com/jeffzyliu/claude-show-your-work#terminals'
 
 export function cantDraw(cause: DrawCause, name: string, kind: 'picture' | 'video' | 'audio' | 'document', id: string) {
   const what = kind === 'video' ? 'videos' : kind === 'audio' ? 'audio' : kind === 'document' ? 'documents' : 'pictures'
@@ -1455,9 +1491,9 @@ function Warning(ui: Ui, $: EngineInterface, site: string, shown: Shown, width: 
   const n = cantDraw(state.drawCause, shown.title, shown.frames ? 'video' : 'picture', state.sessionId)
   const file = shown.origin ?? shown.source ?? shown.path
   const onPress = state.drawCause === 'desktop'
-    ? () => act(n.action) || void $.process.run(openArgv(file)).then(r => { if (r.exitCode !== 0) $.ui.toast(openFailure(r, shown.frames ? 'videos' : 'pictures', file)) })
+    ? () => void $.process.run(openArgv(file)).then(r => { if (r.exitCode !== 0) $.ui.toast(openFailure(r, shown.frames ? 'videos' : 'pictures', file)) })
     : state.drawCause === 'unrecognised'
-      ? (press: { surface: 'terminal' }) => act(n.action) || void (async () => {
+      ? (press: { surface: 'terminal' }) => void (async () => {
         const profile = await turnOnPictures($)
         const copied = await $.ui.copy({ text: n.command, surface: press.surface }).then(r => r.isCopied, () => false)
         const where = profile ? `Added to ${profile.replace(state.home, '~')}. ` : ''
@@ -1502,7 +1538,7 @@ export function NoticeBox(ui: Ui, $: EngineInterface, width: number, n: { title:
           variant="primary"
           label={n.label}
           onPress={(press: { surface: 'terminal' }) =>
-            n.onPress ? n.onPress(press) : act(n.action) || void $.ui.copy({ text: n.copy, surface: press.surface }).then(r => $.ui.toast(r.isCopied ? (n.command ? 'Copied. Paste it in your terminal.' : 'Copied. Paste it to Claude.') : 'Could not copy'))
+            n.onPress ? n.onPress(press) : void $.ui.copy({ text: n.copy, surface: press.surface }).then(r => $.ui.toast(r.isCopied ? (n.command ? 'Copied. Paste it in your terminal.' : 'Copied. Paste it to Claude.') : 'Could not copy'))
           }
         />
       </Box>
@@ -1563,18 +1599,24 @@ export async function Viewer(
   const source = media.origin ?? media.source ?? media.path
   const columns = viewport?.columns ?? 100
   const hasReport = !!(shown.change || shown.changes?.length || shown.summary?.length || shown.checks?.length || (one.isHistory && shown.history))
-  const layout = layoutOf({ columns, rows: viewport?.rows ?? 40, isPane, hasReport })
+  const room = layoutOf({ columns, rows: viewport?.rows ?? 40, isPane, hasReport })
+  const isCarousel = !!shown.carousel?.length && !shown.isRow
+  const layout = room
   const isWide = layout.isWide
   const other = shown.compare ? (media === shown ? shown.compare : shown) : null
   // Each side is drawn from the copy that fits its box (see fitCopy).
   // iTerm2 scales a picture into its box itself, so it never needs a copy
   // fitted to the box (which also shrank the box after the first draw).
-  if (state.cell && state.terminalName !== 'iterm2') for (const side of [media, other]) if (side && side.kind !== 'document') fitCopy($, site, side, pixelsFor(targetBox(side.width, side.height, layout, state.cell), state.cell, side.width / side.height))
+  if (state.cell && state.terminalName !== 'iterm2') for (const side of [media, other]) if (side && side.kind !== 'document') fitCopy($, site, side, pixelsFor(targetBox(side.width, side.height, layout, state.cell), state.cell, side.width / side.height), isCarousel)
   // This side's own box, and the frame it sits in: Original and Updated
   // share the larger of their two boxes, so switching never moves the layout
   // and each side draws whole at its own size, centred.
   const own = drawBox(media.width, media.height, layout, state.cell)
-  const theirs = other ? drawBox(other.width, other.height, layout, state.cell) : own
+  // A carousel's frame is as wide as its widest picture's box and as tall as
+  // its tallest's, so stepping through never moves the buttons or the title.
+  const theirs = isCarousel
+    ? shown.carousel!.map(item => drawBox(item.width, item.height, layout, state.cell)).reduce((m, b) => ({ columns: Math.max(m.columns, b.columns), rows: Math.max(m.rows, b.rows) }), own)
+    : other ? drawBox(other.width, other.height, layout, state.cell) : own
   const box = { columns: Math.max(own.columns, theirs.columns), rows: Math.max(own.rows, theirs.rows) }
   noteLayout(site, { columns, rows: viewport?.rows, room: `${layout.maxCols}x${layout.maxRows}`, isWide, picture: `${media.width}x${media.height}`, box: `${own.columns}x${own.rows}`, frame: `${box.columns}x${box.rows}` })
   if (state.cell && !settings.standard_size && isWiderThanBox(media.width, own.columns, state.cell.width)) problem('picture_wider_than_box', { site, width: media.width, box: `${own.columns}x${own.rows}`, cell: state.cell.width })
@@ -1613,6 +1655,7 @@ export async function Viewer(
     halt(site, 'cannot_draw')
     return Warning(ui, $, site, shown, columns - 8)
   }
+  if (shown.isRow && shown.carousel?.length) return RowView($, ui, site, shown, layout, columns)
   resized($, site, media, shown, own)
   await frameReady($, media, one.frame, site, !!one.timer, !!one.timer)
   // Only expired when the original is gone. A frame not on disk yet (a copy
@@ -1709,9 +1752,9 @@ export async function Viewer(
           {/* Audio with no way to be heard (no ffplay, or the session's speakers
               are another room's) plays silently; that must be said, not silent. */}
           {frames && media.kind === 'audio' && !soundUsable() && <Text dimColor>♪ no sound in this session</Text>}
-          {frames && <Button key="back" plain dimColor label={`« ${SKIP_SECONDS}s`} onPress={() => act('skip_back') || seek($, site, media, one.frame / frames.fps - SKIP_SECONDS, shown, true)} />}
-          {frames && <Button key="forward" plain dimColor label={`${SKIP_SECONDS}s »`} onPress={() => act('skip_forward') || seek($, site, media, one.frame / frames.fps + SKIP_SECONDS, shown, true)} />}
-          {hasSound && <Button key="sound" plain dimColor={!state.isSoundOn} label={state.isSoundOn ? '♪ Mute' : '♪ Unmute'} onPress={() => { act(state.isSoundOn ? 'mute' : 'unmute'); toggleSound($, site, media) }} />}
+          {frames && <Button key="back" plain dimColor label={`« ${SKIP_SECONDS}s`} onPress={() => seek($, site, media, one.frame / frames.fps - SKIP_SECONDS, shown, true)} />}
+          {frames && <Button key="forward" plain dimColor label={`${SKIP_SECONDS}s »`} onPress={() => seek($, site, media, one.frame / frames.fps + SKIP_SECONDS, shown, true)} />}
+          {hasSound && <Button key="sound" plain dimColor={!state.isSoundOn} label={state.isSoundOn ? '♪ Mute' : '♪ Unmute'} onPress={() => { toggleSound($, site, media) }} />}
         </Box>
         <Box flexDirection="row" columnGap={2}>
           {opener}
@@ -1735,6 +1778,111 @@ export async function Viewer(
         {isWide && Report(ui, $, site, shown, prLink, { width: SIDE, height: box.rows + (frames ? 3 : 2) })}
       </Box>
       {!isWide && hasReport && <Box marginTop={1}>{Report(ui, $, site, shown, prLink, { width: below })}</Box>}
+    </Box>
+  )
+}
+
+// A row: every picture at once, each its own image with its title and its own
+// View, Save and Copy path. All share one height; each is as wide as its own
+// shape makes it at that height, and a line wraps when the next would not fit.
+// The height is the biggest that needs no more lines than the fewest lines
+// that still give ROW_MIN_ROWS (or, when even one picture per line is too small
+// for that, one per line).
+function rowPlan(items: Shown[], inner: number, maxRows: number, maxCols: number, cell: { width: number; height: number } | null) {
+  const ratio = cell ? cell.height / cell.width : 2
+  // Never taller than the tallest picture is itself, nor a picture wider than it is.
+  const top = cell ? Math.max(4, Math.min(maxRows, Math.ceil(Math.max(...items.map(item => item.height)) / cell.height))) : maxRows
+  const colsAt = (item: Shown, rows: number) => Math.min(inner, maxCols, Math.max(ROW_CELL_MIN, Math.round(Math.min((item.width / item.height) * rows * ratio, cell ? item.width / cell.width : Number.POSITIVE_INFINITY))))
+  const packAt = (rows: number) => {
+    const lines: { item: Shown; at: number; cols: number }[][] = [[]]
+    let used = 0
+    items.forEach((item, at) => {
+      const cols = colsAt(item, rows)
+      const line = lines[lines.length - 1]!
+      if (line.length && used + ROW_GAP + cols > inner) { lines.push([]); used = 0 }
+      const into = lines[lines.length - 1]!
+      used += (into.length ? ROW_GAP : 0) + cols
+      into.push({ item, at, cols })
+    })
+    return lines
+  }
+  const best = (most: number) => { for (let rows = top; rows >= 4; rows--) if (packAt(rows).length <= most) return rows; return 4 }
+  let rows = best(items.length)
+  for (let most = 1; most <= items.length; most++) {
+    const fits = best(most)
+    if (fits >= Math.min(ROW_MIN_ROWS, top) || most === items.length) { rows = fits; break }
+  }
+  return { rows, lines: packAt(rows) }
+}
+
+// The few pixels a row's picture keeps clear above and below. A box taller than
+// the picture it holds has the picture centred in it, so the picture is made a
+// little narrower than its box and the leftover height splits top and bottom:
+// the title and buttons no longer touch it, at less than a row's cost.
+const ROW_MARGIN_PX = 10
+function inset(box: { columns: number; rows: number }, item: { width: number; height: number }, px = state.cell) {
+  if (!px || box.rows < 2) return box
+  const height = box.rows * px.height - 2 * ROW_MARGIN_PX
+  const columns = Math.floor((height * (item.width / item.height)) / px.width)
+
+  return { columns: Math.max(1, Math.min(box.columns, columns)), rows: box.rows }
+}
+
+async function RowView($: EngineInterface, ui: Ui, site: string, shown: Shown, layout: ReturnType<typeof layoutOf>, columns: number) {
+  const { Box, Text, Image, Button } = ui
+  const one = player(site)
+  const { rows, lines } = rowPlan(shown.carousel!, layout.inner, layout.maxRows, layout.maxCols, state.cell)
+  const boxes = new Map<number, { columns: number; rows: number }>()
+  for (const { item, at, cols } of lines.flat()) {
+    const cellLayout = { ...layout, maxCols: cols, maxRows: rows }
+    if (state.cell && state.terminalName !== 'iterm2') fitCopy($, site, item, pixelsFor(targetBox(item.width, item.height, cellLayout, state.cell), state.cell, item.width / item.height), true)
+    boxes.set(at, drawBox(item.width, item.height, cellLayout, state.cell))
+  }
+  const sizes = lines.flat().map(({ cols }) => cols).join(',')
+  // A line's frame is as tall as its tallest picture is drawn, not the planned
+  // height: a picture short of it by under a row had that slack put above it.
+  const frames = lines.map(line => Math.max(...line.map(({ at }) => boxes.get(at)!.rows)))
+  const total = frames.reduce((n, height) => n + height, 0)
+  // A new box for any picture sends them all again, like a resized single one.
+  const signature = sizes.length * 1000 + total
+  if (one.box?.columns !== signature || one.box.rows !== total || !one.boxGeneration) {
+    one.box = { columns: signature, rows: total }
+    one.boxGeneration = ++boxGenerations
+  }
+  noteLayout(site, { columns, room: `${layout.maxCols}x${layout.maxRows}`, isRow: true, cells: shown.carousel!.length, lines: lines.length, rows, widths: sizes })
+  const first = lines[0]![0]!
+  const pics = new Map(await Promise.all(lines.flat().map(async ({ item, at }) => [at, await picFor($, item.path, boxes.get(at)!)] as const)))
+  probe($, site, `row-${first.at}`, pics.get(first.at)!)
+  const lineWidth = (line: { cols: number }[]) => line.reduce((n, { cols }) => n + cols, 0) + ROW_GAP * (line.length - 1)
+  const width = Math.max(...lines.map(lineWidth))
+  const cell = ({ item, at, cols }: { item: Shown; at: number; cols: number }, frame: number) => {
+    const src = item.origin ?? item.source ?? item.path
+    const name = src.split('/').pop()!
+    const pic = pics.get(at)!
+    const box = inset(boxes.get(at)!, item)
+    const source = 'file' in pic.src ? { ...pic.src, generation: boxGenerationOf(site) } : pic.src
+    return (
+      <Box key={`cell-${at}`} flexDirection="column" width={cols} alignItems="center">
+        <Box width={cols}><Text bold wrap="truncate-end">{item.title}</Text></Box>
+        <Box width={cols} height={frame} justifyContent="center" alignItems="center">
+          {Image ? <Image key={`row-${at}`} source={source} columns={box.columns} rows={box.rows} alt={`[image: ${item.title}]`} /> : <Text dimColor>This surface cannot draw images.</Text>}
+        </Box>
+        <Box flexDirection="row" columnGap={2} width={cols} justifyContent="center">
+          <Button key={`view-${at}`} plain label="↗ View" onPress={() => void $.process.run(openArgv(src)).then(r => $.ui.toast(r.exitCode === 0 ? `Opened ${name.slice(0, 60)}` : openFailure(r, 'pictures', src)))} />
+          {Actions(ui, $, item, src, cols < 26, `-${at}`, true)}
+        </Box>
+      </Box>
+    )
+  }
+
+  // No title bar of its own: each picture has its title above it.
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="subtle" paddingX={1} width={width + 4}>
+      {lines.map((line, n) => (
+        <Box key={`line-${n}`} flexDirection="row" columnGap={ROW_GAP} marginTop={n ? 1 : 0}>
+          {line.map(entry => cell(entry, frames[n]!))}
+        </Box>
+      ))}
     </Box>
   )
 }
@@ -1822,15 +1970,36 @@ async function SplitView(
   )
 }
 
-// The one line a show call's row reads: what it shows, and what with.
-export function toolLine(tool: string, input: unknown, isRunning: boolean): string {
-  const i = (input ?? {}) as { path?: string; title?: string; compare?: string; compare_label?: string; checks?: unknown[] }
-  const what = i.title ?? i.path?.split('/').pop() ?? ''
-  const extra = [
+// A tool's name as a row prints it: `dofile - run_do` for an MCP server's tool
+// (as Claude Code's own rows read), the bare `show_image` for this plugin's.
+export const toolName = (tool: string) => tool.replace(/^mcp__show-your-work__/, '').replace(/^mcp__/, '').replace(/__/g, ' - ')
+
+// What a show call's row reads after its name: what it shows, and what with,
+// joined with ` - `.
+export function toolLine(tool: string, input: unknown): { name: string; info: string } {
+  const i = (input ?? {}) as { path?: string; paths?: unknown; title?: string; compare?: string; compare_label?: string; checks?: unknown[] }
+  const many = Array.isArray(i.paths) ? i.paths.length : 0
+  const what = i.title ?? (many > 1 ? `${many} images` : (i.paths as string[] | undefined)?.[0]?.split('/').pop() ?? i.path?.split('/').pop() ?? '')
+  const info = [
+    what,
     i.compare ? `vs ${i.compare_label ?? i.compare.split('/').pop()}` : '',
     i.checks?.length ? `${i.checks.length} checks` : '',
-  ].filter(Boolean)
-  const verb = tool.endsWith('video') ? (isRunning ? 'Cutting video' : 'Video') : tool.endsWith('html') ? (isRunning ? 'Rendering page' : 'Page') : tool.endsWith('audio') ? (isRunning ? 'Cutting audio' : 'Audio') : tool.endsWith('document') ? (isRunning ? 'Rasterizing document' : 'Document') : isRunning ? 'Loading image' : 'Image'
+  ].filter(Boolean).join(' - ')
 
-  return `${tool.endsWith('video') ? '▶' : tool.endsWith('html') ? '▤' : tool.endsWith('audio') ? '♪' : tool.endsWith('document') ? '▦' : '▣'} ${verb} · ${what}${extra.length ? ` · ${extra.join(' · ')}` : ''}`
+  return { name: toolName(tool), info }
+}
+
+// A tool call's row, drawn like Claude Code's own: a bullet (dim while it runs,
+// red when it failed, else green), the bold name, then ` - ` and the details.
+export function toolHead(ui: Ui, name: string, info: string, phase: 'running' | 'error' | 'done') {
+  const { Text } = ui
+
+  return (
+    <Text>
+      <Text color={phase === 'error' ? 'red' : 'green'} dimColor={phase === 'running'}>⏺</Text>
+      <Text> </Text>
+      <Text bold>{name}</Text>
+      {info ? <Text>{` - ${info}`}</Text> : null}
+    </Text>
+  )
 }

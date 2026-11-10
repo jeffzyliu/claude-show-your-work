@@ -32,7 +32,7 @@ body:
     attributes:
       label: Plugin version
       description: Run `claude plugin list` in your terminal and copy the show-your-work line.
-      placeholder: show-your-work@iamumeransari 0.6.8
+      placeholder: show-your-work@jeffzyliu 0.6.8
     validations:
       required: true
   - type: input

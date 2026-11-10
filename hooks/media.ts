@@ -42,6 +42,24 @@ const MAX_FRAMES = 900
 const MAX_STREAMED = 3600
 const MAX_FPS = 12
 
+// The pictures in another tool's result: image blocks, as Claude Code stores
+// them ({ type: 'image', source: { type: 'base64', media_type, data } }).
+// Found by shape, not by tool name, so any MCP server's charts and screenshots
+// draw. A block too big to be a picture a person looks at is left out.
+const BLOCK_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }
+const BLOCK_MAX = 30_000_000
+export function imageBlocks(output: unknown, max = 12): { ext: string; data: string }[] {
+  if (!Array.isArray(output)) return []
+  const found: { ext: string; data: string }[] = []
+  for (const block of output as { type?: string; source?: { type?: string; media_type?: string; data?: unknown } }[]) {
+    const src = block?.type === 'image' ? block.source : undefined
+    const ext = src?.type === 'base64' ? BLOCK_EXT[src.media_type ?? ''] : undefined
+    if (ext && typeof src?.data === 'string' && src.data.length > 0 && src.data.length <= BLOCK_MAX) found.push({ ext, data: src.data.replace(/\s+/g, '') })
+  }
+
+  return found.slice(0, max)
+}
+
 // A typed or dragged-in path: quotes, backslash-escaped spaces and ~ allowed.
 export function expand(path: string, base: string, homeDir: string): string {
   let p = path.trim().replace(/^(['"])(.*)\1$/, '$2').replace(/\\(.)/g, '$1')
@@ -353,6 +371,8 @@ export type Notice = { kind: NoticeKind; title: string; text: string; message: s
 // How a failure reads, from whatever the tools said; `path` is the person's own.
 export function noticeOf(err: unknown, path: string, homeDir = ''): Notice {
   const raw = String((err as Error)?.message ?? err)
+  // A path is short; anything longer was a mistake (image data) and isn't echoed.
+  if (path.length > 300) path = `${path.slice(0, 60)}… (${path.length} characters)`
   const shown = homeDir && path.startsWith(`${homeDir}/`) ? `~${path.slice(homeDir.length)}` : path
   const name = path.split('/').pop() || path
   if (raw.includes(NO_FFMPEG_LINUX)) return {

@@ -1,7 +1,7 @@
 // The local diagnostics log: what the plugin did and every problem it noticed,
 // as one JSON object per line in TMP/debug.log, for debugging on a real
 // machine without screenshots. Local only: it holds paths and sizes, so it
-// is never sent anywhere, and nothing here may call track() (PostHog).
+// is never sent anywhere,.
 //
 //   SHOW_YOUR_WORK_DEBUG=1   every event is kept and flushed once a second
 //   always                   problems are kept in memory (a few hundred at

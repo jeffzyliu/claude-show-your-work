@@ -46,6 +46,10 @@ export type Shown = {
   compare?: Shown
   /** Earlier kept versions of the same file, oldest first; compare is the last. */
   history?: { path: string; note?: string }[]
+  /** Several pictures shown one at a time with a picker; the fields above are the first one's. */
+  carousel?: Shown[]
+  // The carousel's pictures drawn all at once, wrapping, each with its own buttons.
+  isRow?: boolean
   /** The heading over the changes list, when they aren't changes. */
   changesTitle?: string
   /** One line on this version, for the history list. */
@@ -68,6 +72,6 @@ export type Shown = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'show-your-work': { current: Shown | null; welcome: number }
+    'show-your-work': { current: Shown | null; welcome: number; outputOpen: Record<string, boolean> }
   }
 }

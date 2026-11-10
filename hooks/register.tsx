@@ -1,7 +1,7 @@
 // The entry module: the tools and commands, and the hooks that tie the
 // modules together.
-import { atom, read } from 'claude-code'
-import type { Register } from 'claude-code'
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, Register, RenderElement } from 'claude-code'
 
 import type { Check, KeyChange, Overlay, Shown, Summary } from '../types'
 
@@ -9,16 +9,15 @@ import { state } from './state'
 import { clock, paneSize } from './layout'
 import type { PaneProps } from './layout'
 import { debug, diagnosis, flushDebug } from './diagnostics'
-import { flush, track } from './telemetry'
 import { setUp } from './setup'
 import { haltAllSound, soundUsable } from './sound'
 import { isDocument, prepareDocument } from './document'
 import { forwardPictures, stopForwarding } from './tmux'
-import { CLEAN_SH, exists, expand, findPasted, identityOf, isAudio, isPage, keyOf, locate, NO_FFMPEG, noticeOf, prepare, preparePair, renderPage, REASONS, shiftTimes, trimFrames, VIDEO } from './media'
+import { CLEAN_SH, exists, expand, findPasted, identityOf, imageBlocks, isAudio, isPage, keyOf, locate, NO_FFMPEG, noticeOf, prepare, preparePair, renderPage, shiftTimes, trimFrames, VIDEO } from './media'
 import type { Notice } from './media'
 import { handleOf, MARK, noteOf, preparedOf, remember, shownById, shownOf, storeOf, storeVersion, textOf, timesThatMean, versionsOf } from './history'
 import { hadVersionBefore06, PLUGIN } from './updater'
-import { atStep, cantDraw, causeOf, draw, mayBeDropped, noteDrawn, NO_PLACEHOLDERS, NoticeBox, player, removePicturesLine, sideOf, UNRECOGNISED, stop, terminalOf, toolLine, versions, Viewer } from './player'
+import { atStep, cantDraw, causeOf, draw, mayBeDropped, noteDrawn, NO_PLACEHOLDERS, NoticeBox, player, removePicturesLine, sideOf, UNRECOGNISED, stop, terminalOf, toolHead, toolLine, toolName, versions, Viewer } from './player'
 import type { Ui } from './player'
 import { ensureSettings, goToStop, loadSettings, Opening, openSettings, openUpdate, openWelcome, Settings, startBackground, startTour, Tour, TOUR_TEXT, UPDATE, UpdatePane, WELCOME_TEXT } from './onboarding'
 
@@ -37,11 +36,37 @@ const current = atom({ plugin: 'show-your-work', key: 'current' } as const, null
 // The settings pane's and the tour's redraws. Declared in each file that
 // reads or updates it: the engine only reads an atom declared in the same file.
 const welcome = atom({ plugin: 'show-your-work', key: 'welcome' } as const, 0)
+// Which other tools' calls show their full output under the picture, by tool_use_id.
+const outputOpen = atom({ plugin: 'show-your-work', key: 'outputOpen' } as const, {} as Record<string, boolean>)
 let pastedNames: string[] = []
 // Each failed show's notice, by tool call, for the box drawn in its place.
 const notices = new Map<string, Notice>()
 // Each window's last drawing, handed back while nothing it shows changed.
 const drawn = new Map<string, { key: string; tree: unknown; view: Shown }>()
+// The pictures in another tool's result, made once per result.
+const found = new Map<string, Promise<Shown | null>>()
+// The calls whose group this plugin unfolded itself (see the ToolGroup hook): their rows read `isExpanded` as true without anyone having asked for the full output.
+const unfolded = new Set<string>()
+// Writes each image block to the temp folder and prepares it. Two to four
+// pictures are a row, more a carousel; a tool's own name titles them.
+async function picturesOf($: EngineInterface, tool: string, id: string, blocks: { ext: string; data: string }[]): Promise<Shown | null> {
+  await setUp($)
+  const label = toolName(tool)
+  const items: Shown[] = []
+  for (const [i, block] of blocks.entries()) {
+    const file = `${state.TMP}/mcp-${keyOf(`${id}|${i}|${block.data.length}|${block.data.slice(-48)}`)}.${block.ext}`
+    if (!(await exists($, file))) {
+      const r = await $.process.run(['sh', '-c', 'base64 -d > "$1"', 'sh', file], { stdin: block.data }).catch(() => null)
+      if (!r || r.exitCode !== 0) continue
+    }
+    const title = blocks.length > 1 ? `${label} (${i + 1}/${blocks.length})` : label
+    try { items.push({ ...(await prepare($, file, title)), origin: file }) } catch { /* a block that isn't a picture is skipped */ }
+  }
+  if (!items.length) return null
+  if (items.length === 1) return items[0]!
+
+  return { ...items[0]!, carousel: items, ...(items.length <= 4 ? { isRow: true, title: label } : {}) }
+}
 
 const CHECKS = {
   type: 'array',
@@ -91,6 +116,114 @@ const IMAGE_INPUT = {
   properties: Object.fromEntries(Object.entries(TOOL_INPUT.properties).filter(([k]) => !['checks', 'compare_checks', 'changes_title'].includes(k))),
 }
 
+// show_image alone takes several pictures: a carousel (the default) or one row.
+const SHOW_IMAGE_INPUT = {
+  ...IMAGE_INPUT,
+  properties: {
+    ...IMAGE_INPUT.properties,
+    path: { type: 'string', description: 'Absolute path of one image' },
+    paths: { type: 'array', items: { type: 'string' }, description: 'Several images (up to 12) instead of path: absolute paths' },
+    layout: { type: 'string', enum: ['carousel', 'row'], description: 'For paths: "carousel" (default) shows one at a time with a picker; "row" shows them all at once, separate images that wrap onto new lines' },
+    titles: { type: 'array', items: { type: 'string' }, description: 'One short title for each of paths, in order (carousel and row), or leave out and each is named for its file. About 20 characters, at most 40. Say what sets an image apart from the others, such as "Editor · dark", and skip what they share. The count must match paths.' },
+  },
+  required: [],
+}
+const MAX_PICTURES = 12
+// A title in a row is cut to its picture's width; this keeps one long one from taking over.
+const TITLE_MAX = 40
+const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
+// Base64 or a data: address, not a path: long, with no extension, or only base64 characters.
+const isImageData = (p: string) => /^data:/i.test(p.trim()) || p.length > 4096 || /^[A-Za-z0-9+/=\s]{256,}$/.test(p)
+
+// The line that stands for another tool's call: a green bullet and the bold
+// name, as Claude Code's own rows read. A click shows or hides core's full row,
+// the call and its output. (Button holds styled Text only on 2.1.295+.)
+function callHeader($: EngineInterface, e: Parameters<EngineInterface['ui']['resolve']>[0], tool: string, callId: string) {
+  const { Button, Text } = $.ui.resolve(e) as Ui
+  const name = toolName(tool)
+  const toggle = () => { void update($, outputOpen, open => ({ ...open, [callId]: !open[callId] })) }
+
+  return state.canColourButtons
+    ? <Button key={`output-${callId}`} plain label={`⏺ ${name}`} onPress={toggle}><Text color="green">⏺</Text><Text> </Text><Text bold>{name}</Text></Button>
+    : <Button key={`output-${callId}`} plain label={`⏺ ${name}`} onPress={toggle} />
+}
+
+// Draws a tool's result row: the player for this plugin's own tools, any pictures in another tool's output under its ToolUse row.
+type RowTarget = Parameters<EngineInterface['ui']['resolve']>[0] & { requestId: string; props: unknown; viewport?: { columns: number; rows: number } }
+async function drawResult<E extends RowTarget>($: EngineInterface, e: E, next: (e: E) => Promise<RenderElement> | RenderElement): Promise<RenderElement> {
+  const props = e.props as { tool: string; output: unknown; isErrored: boolean; onScreen?: unknown }
+  // Another tool's call: its own row, then any pictures in its output.
+  const isMine = TOOLS.includes(props.tool)
+  const blocks = isMine || props.isErrored ? [] : imageBlocks(props.output)
+  if (!isMine && !blocks.length) return next(e)
+  // The picture stands for the call, so core's row (the call's input and its
+  // whole result text, which the unfolded group draws inline) gives way to one
+  // line naming the tool.
+  let row: unknown = null
+  if (!isMine) {
+    const { Box } = $.ui.resolve(e) as Ui
+    const callId = (props as { tool_use_id?: string }).tool_use_id ?? e.requestId
+    const isOpen = (await read($, outputOpen))[callId] === true
+    const header = callHeader($, e, props.tool, callId)
+    // Expanded (ctrl+o, --verbose): core's full row always shows, as for any tool.
+    const isAsked = (props as { isExpanded?: boolean }).isExpanded === true && !unfolded.has(callId)
+    row = isOpen || isAsked ? <Box flexDirection="column">{header}{await next(e)}</Box> : header
+  }
+  if (props.isErrored) {
+    const n = notices.get((props as { tool_use_id?: string }).tool_use_id ?? '') ??
+      (textOf(props.output).includes(NO_FFMPEG) ? noticeOf(new Error(NO_FFMPEG), '') : undefined)
+    if (!n) return next(e)
+    return NoticeBox($.ui.resolve(e) as Ui, $, (e.viewport?.columns ?? 100) - 8, { ...n, copy: n.prompt, label: 'Copy prompt', action: `copy_${n.kind}_prompt` })
+  }
+  // Scrolled out of view: stop playing.
+  const one = player(e.requestId)
+  if (props.onScreen === null) {
+    if (one.timer) stop($, e.requestId)
+    if (!one.wasAway) debug(`away ${e.requestId}`)
+    one.wasAway = true
+  } else if (one.wasAway && props.onScreen) {
+    // Back in view. The layout hasn't changed, so the kept drawing stands;
+    // only the picture is sent again, as the terminal may have dropped it.
+    one.wasAway = false
+    one.resend = true
+    debug(`back ${e.requestId}`)
+  }
+  const key = `${state.version}|${versions.get(e.requestId) ?? 0}|${e.viewport?.columns ?? 0}|${e.viewport?.rows ?? 0}`
+  const kept = drawn.get(e.requestId)
+  let tree = kept?.key === key ? (kept.tree as Awaited<ReturnType<typeof Viewer>>) : null
+  let view = kept?.view
+  if (!tree || !view) {
+    // After /reload-plugins nothing else has set up the folders yet: without
+    // this the result looks for its picture in the wrong place and collapses.
+    await setUp($)
+    await ensureSettings($)
+    let made = isMine ? undefined : found.get(e.requestId)
+    if (!isMine && !made) found.set(e.requestId, (made = picturesOf($, props.tool, e.requestId, blocks)))
+    const shown = isMine ? await shownOf($, props.output) : await made!
+    if (!shown) { found.delete(e.requestId); return next(e) }
+    view = atStep(shown, e.requestId)
+    tree = await Viewer($, e, view, e.requestId, false, e.viewport)
+    drawn.set(e.requestId, { key, tree, view })
+    if (kept?.view === undefined) noteDrawn(e.requestId, view.width, view.height)
+  }
+  // Back in view: send the picture again at once, but only if the terminal
+  // may have dropped it; otherwise it still has it and nothing is decoded.
+  if (one.resend) {
+    one.resend = false
+    if (mayBeDropped(e.requestId)) {
+      debug(`resend ${e.requestId}`)
+      draw($, e.requestId, sideOf(view, e.requestId), view)
+    }
+  }
+
+  if (row) {
+    const { Box } = $.ui.resolve(e) as Ui
+    return <Box flexDirection="column">{row}{tree}</Box>
+  }
+
+  return tree
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -129,13 +262,6 @@ export const register: Register = on => {
         state.probed = true
         state.drawCause = isDesktop ? 'desktop' : NO_PLACEHOLDERS[state.terminalName] ? 'terminal' : causeOf(state.inTmux, state.terminalName, state.isForced)
       }
-      state.statsContext = {
-        plugin_version: state.pluginVersion,
-        claude_code_version: (await $.session.version().catch(() => ({ base: '' }))).base ?? '',
-        terminal,
-        has_ffmpeg: await exists($, state.ffmpeg),
-        os: state.isMac ? 'macos' : 'linux',
-      }
       // Every install sees the welcome and tour once, an update included:
       // installs from before 0.6.2 never had one. 0.6.0 stored 'welcomed' both
       // when it showed the welcome and when it skipped it for an update; an
@@ -148,7 +274,7 @@ export const register: Register = on => {
           await $.store.set('toured', true)
         }
       }
-      // An update keeps what it already ran: its updates and usage counts start
+      // An update keeps what it already ran: its updates start
       // now, and only a fresh install waits for the welcome.
       const isUpdate = (await Promise.all(['welcomed', 'installId', 'updateCheckedAt'].map(key => $.store.get(key)))).some(value => value !== undefined && value !== null)
       if (!state.isWelcomed && isUpdate) await startBackground($)
@@ -207,8 +333,8 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'show_image',
       description:
-        `Shows an image file to the user, inline in their terminal. Accepts PNG, JPEG, WebP, GIF and TIFF.\n\nUse it without being asked whenever you have made or changed something visual, before you say the work is done: screenshot a page or component with headless Playwright, or show a design concept, chart, slide or generated image. Do this instead of asking the user to open a file or a localhost URL. Don't use it when nothing visual changed.\n\nWhen the image shows work you changed, also pass \`changes\` (what you changed, a few words each) and \`compare\` (an image of the same view from before the change), so the user can switch between Original, Updated and Compare. Pass \`summary\` only for checks you actually ran. When you show a new version of something you showed earlier, pass \`previous\` with its #id so both stay in the same history.\n\nThe image goes to the user's screen, not to you. Read the file yourself only if you need to check it.\n\n${SCRATCH_NOTE}`,
-      inputSchema: IMAGE_INPUT,
+        `Shows an image file to the user, inline in their terminal. Accepts PNG, JPEG, WebP, GIF and TIFF.\n\nUse it without being asked whenever you have made or changed something visual, before you say the work is done: screenshot a page or component with headless Playwright, or show a design concept, chart, slide or generated image. Do this instead of asking the user to open a file or a localhost URL. Don't use it when nothing visual changed.\n\nWhen the image shows work you changed, also pass \`changes\` (what you changed, a few words each) and \`compare\` (an image of the same view from before the change), so the user can switch between Original, Updated and Compare. To show several images at once pass \`paths\` instead of \`path\`: by default they become a carousel the user steps through (give each a short name in \`titles\`); with \`layout: \"row\"\` they are all shown at once as separate images that wrap onto new lines (give each a short name in \`titles\`), each with its own View, Save and Copy path. A carousel or row has no compare or history. Pass \`summary\` only for checks you actually ran. When you show a new version of something you showed earlier, pass \`previous\` with its #id so both stay in the same history.\n\nThe image goes to the user's screen, not to you. Read the file yourself only if you need to check it.\n\n${SCRATCH_NOTE}`,
+      inputSchema: SHOW_IMAGE_INPUT,
       isDeferred: false,
     })
     await $.tool.register({
@@ -238,7 +364,6 @@ export const register: Register = on => {
     // The next session starts with sound on, and nothing sounds past this one.
     state.isSoundOn = true
     haltAllSound('session_end')
-    await flush($).catch(() => undefined)
     await stopForwarding($)
 
     return next(e)
@@ -278,11 +403,9 @@ export const register: Register = on => {
       // wipes the module's memory.
       await $.process.run(['sh', '-c', 'printf "%s" "$1" > "$0"', `${await storeOf($)}/${id}.shown`, JSON.stringify(shown)]).catch(() => undefined)
 
-      track('img_command', { kind: shown.frames ? 'video' : 'image' })
       return { text: `Showing ${shown.title}.\n${MARK}#${id}` }
     } catch (err) {
       const n = noticeOf(err, expand(arg, state.cwd, state.home), state.home)
-      track('show_failed', { from: 'img_command', reason: REASONS[n.kind] })
       return { text: n.message }
     }
   })
@@ -298,11 +421,9 @@ export const register: Register = on => {
       shownById.set(id, shown)
       await $.process.run(['sh', '-c', 'printf "%s" "$1" > "$0"', `${await storeOf($)}/${id}.shown`, JSON.stringify(shown)]).catch(() => undefined)
 
-      track('page_command', { kind: 'image' })
       return { text: `Previewing ${shown.title}. Open page opens it in your browser.\n${MARK}#${id}` }
     } catch (err) {
       const n = noticeOf(err, arg, state.home)
-      track('show_failed', { from: 'page_command', reason: REASONS[n.kind] })
       return { text: n.message }
     }
   })
@@ -318,11 +439,9 @@ export const register: Register = on => {
       shownById.set(id, shown)
       await $.process.run(['sh', '-c', 'printf "%s" "$1" > "$0"', `${await storeOf($)}/${id}.shown`, JSON.stringify(shown)]).catch(() => undefined)
 
-      track('audio_command', { kind: shown.frames ? 'audio' : 'image' })
       return { text: `Showing ${shown.title}.${soundUsable() ? ' Press Play to hear it.' : ''}\n${MARK}#${id}` }
     } catch (err) {
       const n = noticeOf(err, arg, state.home)
-      track('show_failed', { from: 'audio_command', reason: REASONS[n.kind] })
       return { text: n.message }
     }
   })
@@ -338,11 +457,9 @@ export const register: Register = on => {
       shownById.set(id, shown)
       await $.process.run(['sh', '-c', 'printf "%s" "$1" > "$0"', `${await storeOf($)}/${id}.shown`, JSON.stringify(shown)]).catch(() => undefined)
 
-      track('doc_command', { kind: 'document' })
       return { text: `Showing ${shown.title} (${shown.pages?.count ?? 1} page${(shown.pages?.count ?? 1) === 1 ? '' : 's'}).\n${MARK}#${id}` }
     } catch (err) {
       const n = noticeOf(err, arg, state.home)
-      track('show_failed', { from: 'doc_command', reason: REASONS[n.kind] })
       return { text: n.message }
     }
   })
@@ -352,12 +469,43 @@ export const register: Register = on => {
       path?: string; title?: string; change?: string; pr?: string; changes?: KeyChange[]; summary?: Summary[]; url?: string; checks?: Check[]
       compare?: string; compare_checks?: Check[]; label?: string; compare_label?: string; overlay?: Overlay; versions?: unknown; previous?: string; changes_title?: string
     }
-    if (!input.path) return { deny: 'A path is needed.' }
+    const extra = e as unknown as { paths?: unknown; layout?: string; titles?: unknown }
+    const toolName = String((e as { tool?: string }).tool ?? '')
+    const listed = toolName.endsWith('show_image') && Array.isArray(extra.paths) ? (extra.paths as unknown[]).filter((p): p is string => typeof p === 'string' && !!p) : []
+    if (!input.path && !listed.length) return { deny: 'A path is needed.' }
+    // Image data (base64 or a data: address) is not a path: refuse it short,
+    // so the data isn't echoed back in an error.
+    const supplied = [input.path, input.compare, ...(Array.isArray(extra.paths) ? (extra.paths as unknown[]) : [])]
+    if (supplied.some(p => typeof p === 'string' && isImageData(p))) return { deny: 'show_image takes file paths, not image data (base64 or a data: address). Save the image to a file first, then pass its path.' }
+    // Several pictures: one short title each, or none (then each is named for its file).
+    if (listed.length > 1 && Array.isArray(extra.titles) && extra.titles.length) {
+      const bad = extra.titles.length !== listed.length || (extra.titles as unknown[]).some(t => typeof t !== 'string' || !t.trim())
+      if (bad) return { deny: `titles must hold one short, non-empty title for each of the ${listed.length} paths (it holds ${extra.titles.length}), or be left out so each image is named for its file.` }
+    }
+    if (listed.length > MAX_PICTURES) return { deny: `At most ${MAX_PICTURES} images at once.` }
     await setUp($)
     // The history's copy of a file that then can't be shown goes again.
     let copied = ''
     try {
-      input.path = await locate($, input.path)
+      // Several pictures: a carousel or a row starts from its first and gets
+      // the rest once that one is prepared.
+      let carousel: { path: string; title: string }[] = []
+      if (listed.length > 1) {
+        const where = await Promise.all(listed.map(p => locate($, p)))
+        for (const p of where) if (!MEDIA.test(p) || VIDEO.test(p)) throw new Error(`not an image: ${p}`)
+        const names = Array.isArray(extra.titles) ? (extra.titles as unknown[]) : []
+        carousel = where.map((path, i) => ({
+          path,
+          title: typeof names[i] === 'string' && names[i] ? clip(names[i] as string, TITLE_MAX) : extra.layout !== 'row' && input.title ? `${input.title} (${i + 1}/${where.length})` : path.split('/').pop()!,
+        }))
+        input.path = carousel[0]!.path
+        // A row's window is titled for the whole set; a carousel's for the picture on show.
+        if (extra.layout === 'row') input.title ??= `${where.length} images`
+        else input.title = carousel[0]!.title
+        // Several pictures have no before and after.
+        input.compare = input.previous = input.versions = undefined
+      } else if (listed.length === 1) input.path = listed[0]
+      input.path = await locate($, input.path!)
       if (input.compare) input.compare = await locate($, input.compare)
       const note = noteOf(input.changes, input.change, input.title)
       const parent = handleOf(input.previous)
@@ -398,6 +546,16 @@ export const register: Register = on => {
         note,
         ...(input.changes_title ? { changesTitle: String(input.changes_title).slice(0, 28) } : {}),
       }
+      if (carousel.length) {
+        const first = { kind: shown.kind, path: shown.path, source: shown.source, origin: shown.origin, width: shown.width, height: shown.height, sourceWidth: shown.sourceWidth, sourceHeight: shown.sourceHeight, title: carousel[0]!.title, generation: shown.generation } as Shown
+        const rest: Shown[] = []
+        for (const item of carousel.slice(1)) {
+          const kept = await storeVersion($, item.path, '', item.title, undefined).catch(() => null)
+          rest.push({ ...(await prepare($, kept?.copy ?? item.path, item.title)), origin: kept?.real ?? item.path })
+        }
+        shown.carousel = [first, ...rest]
+        if (extra.layout === 'row') shown.isRow = true
+      }
       const lead = shown.frames?.lead ?? 0
       shown.checks = shiftTimes(shown.checks, lead)
       shown.changes = shiftTimes(shown.changes, lead)
@@ -424,24 +582,7 @@ export const register: Register = on => {
       }
       if (!shown.frames && kept.copy !== kept.real)
         remember(kept.copy, { kind: shown.kind, path: shown.path, source: shown.source, width: shown.width, height: shown.height, title: 'Original', generation: shown.generation })
-      const what = shown.kind === 'audio' ? `audio, ${clock(shown.frames!.duration)}` : shown.kind === 'document' ? `document, ${shown.pages?.count ?? 1} pages` : shown.frames ? `video, ${clock(shown.frames.duration)}` : `${shown.sourceWidth ?? shown.width}×${shown.sourceHeight ?? shown.height}`
-      const checks = [...(shown.checks ?? []), ...(shown.compare?.checks ?? [])]
-      track(shown.frames ? 'video_shown' : 'image_shown', {
-        format: (input.path.match(/\.([a-z0-9]+)$/i)?.[1] ?? 'none').toLowerCase().slice(0, 5),
-        ...(shown.frames ? { duration: Math.round(shown.frames.duration * 10) / 10, frames: shown.frames.count } : {}),
-        has_compare: !!shown.compare,
-        is_side_by_side: !!shown.pair,
-        is_revision: !!input.previous,
-        versions: shown.history?.length ?? 0,
-        changes: shown.changes?.length ?? 0,
-        has_custom_changes_title: !!input.changes_title,
-        summary_lines: shown.summary?.length ?? 0,
-        summary_ok: shown.summary ? shown.summary.every(l => l.ok) : undefined,
-        checks: checks.length,
-        checks_failed: checks.filter(c => !c.ok).length,
-        has_url: !!input.url,
-        has_pr: !!input.pr,
-      })
+      const what = shown.carousel ? `${shown.carousel.length} images, ${shown.isRow ? 'a row' : 'a carousel'}` : shown.kind === 'audio' ? `audio, ${clock(shown.frames!.duration)}` : shown.kind === 'document' ? `document, ${shown.pages?.count ?? 1} pages` : shown.frames ? `video, ${clock(shown.frames.duration)}` : `${shown.sourceWidth ?? shown.width}×${shown.sourceHeight ?? shown.height}`
 
       const handle = kept.id ? ` #${kept.id}${kept.chain.length ? `, version ${kept.chain.length + 1} after #${kept.chain.at(-1)!.id}` : ''}.` : ''
       const hint = (kept.missing ? ` #${kept.missing} wasn't found, so this has no history.` : '') + handle
@@ -462,7 +603,6 @@ export const register: Register = on => {
       if (copied) void $.process.run(['rm', '-f', '--', copied, copied.replace(/\.[^./]+$/, '.json')]).catch(() => undefined)
       const n = noticeOf(err, expand(input.path ?? '', state.cwd, state.home), state.home)
       notices.set(e.tool_use_id, n)
-      track('show_failed', { from: String((e as { tool?: string }).tool ?? '').endsWith('video') ? 'show_video' : String((e as { tool?: string }).tool ?? '').endsWith('audio') ? 'show_audio' : String((e as { tool?: string }).tool ?? '').endsWith('document') ? 'show_document' : 'show_image', reason: REASONS[n.kind] })
       return { deny: `show-your-work: ${n.message}` }
     }
   }).catch(() => ({ deny: 'show-your-work: it could not be shown.' }))
@@ -470,62 +610,39 @@ export const register: Register = on => {
   // The call's own row: one short line, not the whole input.
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
     const props = e.props as { tool: string; input: unknown; isRunning: boolean }
-    if (!TOOLS.includes(props.tool)) return next(e)
-    const { Text } = $.ui.resolve(e) as Ui
+    if (!TOOLS.includes(props.tool)) return drawResult($, e, next)
+    const { name, info } = toolLine(props.tool, props.input)
 
-    return <Text>{toolLine(props.tool, props.input, props.isRunning)}</Text>
+    return toolHead($.ui.resolve(e) as Ui, name, info, props.isRunning ? 'running' : (props as { isErrored?: boolean }).isErrored ? 'error' : 'done')
   })
 
-  // Inline in the transcript: the player is the tool's result row.
-  on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
-    const props = e.props as { tool: string; output: unknown; isErrored: boolean; onScreen?: unknown }
-    if (!TOOLS.includes(props.tool)) return next(e)
-    if (props.isErrored) {
-      const n = notices.get((props as { tool_use_id?: string }).tool_use_id ?? '') ??
-        (textOf(props.output).includes(NO_FFMPEG) ? noticeOf(new Error(NO_FFMPEG), '') : undefined)
-      if (!n) return next(e)
-      return NoticeBox($.ui.resolve(e) as Ui, $, (e.viewport?.columns ?? 100) - 8, { ...n, copy: n.prompt, label: 'Copy prompt', action: `copy_${n.kind}_prompt` })
-    }
-    // Scrolled out of view: stop playing.
-    const one = player(e.requestId)
-    if (props.onScreen === null) {
-      if (one.timer) stop($, e.requestId)
-      if (!one.wasAway) debug(`away ${e.requestId}`)
-      one.wasAway = true
-    } else if (one.wasAway && props.onScreen) {
-      // Back in view. The layout hasn't changed, so the kept drawing stands;
-      // only the picture is sent again, as the terminal may have dropped it.
-      one.wasAway = false
-      one.resend = true
-      debug(`back ${e.requestId}`)
-    }
-    const key = `${state.version}|${versions.get(e.requestId) ?? 0}|${e.viewport?.columns ?? 0}|${e.viewport?.rows ?? 0}`
-    const kept = drawn.get(e.requestId)
-    let tree = kept?.key === key ? (kept.tree as Awaited<ReturnType<typeof Viewer>>) : null
-    let view = kept?.view
-    if (!tree || !view) {
-      // After /reload-plugins nothing else has set up the folders yet: without
-      // this the result looks for its picture in the wrong place and collapses.
-      await setUp($)
-      await ensureSettings($)
-      const shown = await shownOf($, props.output)
-      if (!shown) return next(e)
-      view = atStep(shown, e.requestId)
-      tree = await Viewer($, e, view, e.requestId, false, e.viewport)
-      drawn.set(e.requestId, { key, tree, view })
-      if (kept?.view === undefined) noteDrawn(e.requestId, view.width, view.height)
-    }
-    // Back in view: send the picture again at once, but only if the terminal
-    // may have dropped it; otherwise it still has it and nothing is decoded.
-    if (one.resend) {
-      one.resend = false
-      if (mayBeDropped(e.requestId)) {
-        debug(`resend ${e.requestId}`)
-        draw($, e.requestId, sideOf(view, e.requestId), view)
-      }
-    }
+  // A folded run of tool calls is one count line, and an MCP server's calls
+  // fold into it. A picture drawn inside that line is part of the group, so a
+  // click anywhere on its box (the edges, the gaps) expands the group. A group
+  // that holds a picture is unfolded instead: each call is then a ToolUse row,
+  // and drawResult draws its header and picture, outside any click of the group.
+  on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
+    const ids = e.props.calls.map(call => call.tool_use_id).filter((id): id is string => !!id)
+    // Expanded by the person (ctrl+o, --verbose): not ours, so its rows show their full output.
+    if (e.props.isExpanded) {
+      for (const id of ids) unfolded.delete(id)
 
-    return tree
+      return next(e)
+    }
+    const hasPictures = e.props.calls.some(call => !call.isErrored && imageBlocks(call.output).length > 0)
+    if (!hasPictures) return next(e)
+    for (const id of ids) unfolded.add(id)
+
+    return next({ ...e, props: { ...e.props, isExpanded: true } })
+  })
+
+  // Inline in the transcript: the player is the tool's result row. Another
+  // tool's pictures are drawn from its ToolUse row instead (the engine passes
+  // a ToolResult hook nothing for them, but ToolUse.output holds the blocks).
+  on('ui.render', { component: 'ToolResult' }, ($, e, next) => {
+    if (!TOOLS.includes((e.props as { tool: string }).tool)) return next(e)
+
+    return drawResult($, e, next)
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

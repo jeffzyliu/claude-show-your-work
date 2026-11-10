@@ -140,6 +140,5 @@ test('audio too short for a frame is said in audio words', () => {
 })
 
 test('the tool row reads like the other rows', () => {
-  expect(toolLine('mcp__show-your-work__show_audio', { path: '/tmp/tone.mp3' }, true)).toBe('♪ Cutting audio · tone.mp3')
-  expect(toolLine('mcp__show-your-work__show_audio', { path: '/tmp/tone.mp3' }, false)).toBe('♪ Audio · tone.mp3')
+  expect(toolLine('mcp__show-your-work__show_audio', { path: '/tmp/tone.mp3' })).toEqual({ name: 'show_audio', info: 'tone.mp3' })
 })

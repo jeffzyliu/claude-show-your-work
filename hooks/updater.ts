@@ -4,7 +4,6 @@
 import type { EngineInterface } from 'claude-code'
 
 import { state } from './state'
-import { isInstalledCopy, track } from './telemetry'
 
 // Keeps the plugin current without the user turning on marketplace
 // auto-update: once a day it asks GitHub for the version on the install's
@@ -18,8 +17,8 @@ import { isInstalledCopy, track } from './telemetry'
 // (its store is kept), in a process of its own (see moveTo). Off with
 // SHOW_YOUR_WORK_AUTO_UPDATE=0 or CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, and
 // never for an install pinned to a release tag.
-const REPO = 'iamumeransari/claude-show-your-work'
-const MARKETPLACE = 'iamumeransari'
+const REPO = 'jeffzyliu/claude-show-your-work'
+const MARKETPLACE = 'jeffzyliu'
 export const PLUGIN = 'show-your-work'
 const SOURCE = `https://github.com/${REPO}.git`
 export const BRANCHES = { stable: 'releases', latest: 'latest' } as const
@@ -69,6 +68,9 @@ function jsonOf<T>(text: string | undefined, fallback: T): T {
 // SHOW_YOUR_WORK_AUTO_UPDATE=0 or CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set. It installs any newer version without asking. Claude Code only loads
 // the new version in a new session, so once one is installed a status line
 // under the prompt says so until Claude Code restarts.
+// An installed copy runs from Claude Code's plugin cache; one loaded from a folder (--plugin-dir) is in development.
+export const isInstalledCopy = (root: string) => /\/plugins\/cache\//.test(root)
+
 export async function checkForUpdate($: EngineInterface, current: string, branch: Branch = BRANCHES.stable) {
   const off = await $.env.get('SHOW_YOUR_WORK_AUTO_UPDATE')
   if (/^(0|false|off|no)$/i.test(off ?? '')) return
@@ -79,7 +81,6 @@ export async function checkForUpdate($: EngineInterface, current: string, branch
   // Every check says how it ended, so a stuck install shows why. Only a check
   // that got through counts for the day; one that couldn't run tries again
   // at the next session.
-  track('update_check', { result: found.kind, channel: branch, ...('latest' in found ? { latest: found.latest } : {}) })
   if (found.kind !== 'offline' && found.kind !== 'no_cli') await $.store.set('updateCheckedAt', now)
   const isReady = found.kind === 'pending' || ((found.kind === 'update' || found.kind === 'move') && (await installUpdate($, found, current)))
   if (isReady && 'latest' in found) $.ui.status(`show-your-work ${found.latest} is ready. Restart Claude Code to use it.`)
@@ -108,8 +109,8 @@ export async function findUpdate($: EngineInterface, current: string, branch: Br
   // No such branch yet, or no network: nothing to say about it.
   // Each channel's address written out in full, so the directory review can read it.
   const r = await (branch === BRANCHES.latest
-    ? $.http.fetch('https://raw.githubusercontent.com/iamumeransari/claude-show-your-work/latest/.claude-plugin/plugin.json')
-    : $.http.fetch('https://raw.githubusercontent.com/iamumeransari/claude-show-your-work/releases/.claude-plugin/plugin.json')
+    ? $.http.fetch('https://raw.githubusercontent.com/jeffzyliu/claude-show-your-work/latest/.claude-plugin/plugin.json')
+    : $.http.fetch('https://raw.githubusercontent.com/jeffzyliu/claude-show-your-work/releases/.claude-plugin/plugin.json')
   ).catch(() => null)
   if (!r?.ok) return { kind: 'offline' }
   const latest = String(jsonOf<{ version?: string }>(r.text, {}).version ?? '')
@@ -146,10 +147,8 @@ export async function installUpdate($: EngineInterface, found: Extract<Found, { 
   await claude($, ['plugin', 'marketplace', 'update', MARKETPLACE])
   const done = await claude($, ['plugin', 'update', `${PLUGIN}@${MARKETPLACE}`, '--scope', found.scope])
   if (done?.exitCode !== 0) {
-    track('update_failed', { from: current, to: found.latest })
     return false
   }
-  track('update_installed', { from: current, to: found.latest })
   return true
 }
 
@@ -175,7 +174,6 @@ async function moveTo($: EngineInterface, branch: Branch, market: { url?: string
   if (!installed || !claudeBinary) return false
   const url = market.url ?? SOURCE
   const old = market.ref ? `${url}#${market.ref}` : url
-  track('channel_move', { from: market.ref ?? 'main', to: branch })
   const r = await $.process.run([...DETACH, 'sh', '-c', MOVE_SH, 'move', claudeBinary, url, branch, old, installed.scope ?? 'user', MARKETPLACE, `${PLUGIN}@${MARKETPLACE}`]).catch(() => undefined)
   return r?.exitCode === 0
 }

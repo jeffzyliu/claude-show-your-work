@@ -2,7 +2,6 @@
 // player's and tour's progress, and the settings.
 import type { Cell } from './layout'
 import type { DrawCause } from './player'
-import type { Event, Props } from './telemetry'
 
 // An imported `let` is read-only to the module that imports it, so anything
 // set in one module and read in another is a field of this object.
@@ -67,18 +66,14 @@ export const state = {
   // The hint Claude was last given with a prompt (hintNow): sent again only
   // when it changes, or after a compaction.
   sentHint: '',
-  // SHOW_YOUR_WORK_DEBUG=1 (see debug in telemetry.ts).
+  // SHOW_YOUR_WORK_DEBUG=1 (see debug in diagnostics.ts).
   isDebug: false,
   terminalName: '',
   // CLAUDE_CODE_FORCE_TERMINAL_IMAGES was set when Claude Code started.
   isForced: false,
   // Inside tmux, the terminal around it (`ghostty`, `kitty`, `rex`, or '').
   outerTerminal: '',
-  // Usage stats: whether they're on, and the events waiting to go out.
-  isOn: false,
-  queue: [] as Event[],
   pluginVersion: '0.0.0',
-  statsContext: {} as Props,
   isWelcomed: false,
   // The tour: its live row, and where it is.
   tourSite: '',
@@ -89,13 +84,12 @@ export const state = {
 }
 
 // The switches, kept in the plugin's store (a /config row would reload the
-// plugin on every change). The environment variables still turn updates and
-// usage counts off whatever these say.
+// plugin on every change). The environment variables still turn updates
+// off whatever these say.
 export const SETTINGS = [
   { field: 'stable_updates', title: 'Updates', options: ['Stable releases', 'Latest'], text: 'Automatically install plugin updates from GitHub' },
-  { field: 'usage_stats', title: 'Usage data', options: ['Share anonymously', "Don't share"], text: 'Helps fix bugs and improve the product experience. No sensitive data is ever shared' },
   { field: 'standard_size', title: 'Picture size', options: ['Standard', 'Large'], text: 'Large shows pictures and videos one and a half times bigger' },
 ] as const
 export type Field = (typeof SETTINGS)[number]['field']
 // Each switch is true on its first option, the default.
-export const settings: Record<Field, boolean> = { stable_updates: true, usage_stats: true, standard_size: true }
+export const settings: Record<Field, boolean> = { stable_updates: true, standard_size: true }

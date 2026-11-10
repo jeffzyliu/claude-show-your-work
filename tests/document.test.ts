@@ -84,8 +84,7 @@ test('markdown prints to pdf through chrome, sandbox on, throwaway profile, wait
 })
 
 test('the tool row reads like the other rows', () => {
-  expect(toolLine('mcp__show-your-work__show_document', { path: '/tmp/r.pdf' }, true)).toBe('▦ Rasterizing document · r.pdf')
-  expect(toolLine('mcp__show-your-work__show_document', { path: '/tmp/r.pdf' }, false)).toBe('▦ Document · r.pdf')
+  expect(toolLine('mcp__show-your-work__show_document', { path: '/tmp/r.pdf' })).toEqual({ name: 'show_document', info: 'r.pdf' })
 })
 
 test('readiness is a document status marker, never arbitrary user text', () => {

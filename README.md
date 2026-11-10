@@ -7,10 +7,10 @@
 <p align="center">See, review and iterate on your agent's work without leaving the terminal.<br>Images, videos and visual QA for Claude Code.</p>
 
 <p align="center">
-  <a href="https://github.com/iamumeransari/claude-show-your-work/stargazers"><img src="https://img.shields.io/github/stars/iamumeransari/claude-show-your-work?style=flat&logo=github&label=Stars&color=E3B341" alt="GitHub stars"></a>
+  <a href="https://github.com/jeffzyliu/claude-show-your-work/stargazers"><img src="https://img.shields.io/github/stars/jeffzyliu/claude-show-your-work?style=flat&logo=github&label=Stars&color=E3B341" alt="GitHub stars"></a>
   <a href="#install"><img src="https://img.shields.io/badge/Claude_Code-plugin-D97757?logo=claude&logoColor=white" alt="Claude Code plugin"></a>
   <a href="#install"><img src="https://img.shields.io/badge/macOS_%7C_Linux-555555" alt="macOS and Linux"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/iamumeransari/claude-show-your-work?color=22C55E" alt="MIT license"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/jeffzyliu/claude-show-your-work?color=22C55E" alt="MIT license"></a>
 </p>
 
 ## Install
@@ -18,8 +18,8 @@
 Run these two commands in Claude Code:
 
 ```
-/plugin marketplace add https://github.com/iamumeransari/claude-show-your-work.git#releases
-/plugin install show-your-work@iamumeransari
+/plugin marketplace add https://github.com/jeffzyliu/claude-show-your-work.git#releases
+/plugin install show-your-work@jeffzyliu
 ```
 
 It supports Ghostty and kitty, on macOS and Linux, with Claude Code 2.1.286 or later. Videos and audio also need ffmpeg: install it with your package manager (`brew install ffmpeg` on macOS), or ask Claude to install it. HTML pages need Chrome, Chromium or Playwright's browser, and PDFs need poppler (`brew install poppler`).
@@ -57,6 +57,7 @@ Whatever Claude designs, you see it right in the chat: landing pages, app screen
 - **Compare Directions:** Several concepts show together, so you can pick one at a glance instead of opening files one by one.
 - **Every Version Kept:** Each new version lands in the same player, and History lets you step back through every earlier draft.
 - **Before and After:** Switch between the old and new design, or put them side by side, to see exactly what changed.
+- **Other Tools' Pictures:** A chart or screenshot that another tool returns (a Stata graph from dofile, an MCP server's screenshot) draws under that tool's line. Click the line to see the tool's full output.
 
 ### Video
 
@@ -188,7 +189,7 @@ No, it doesn't take up much space. It keeps recent pictures and videos so you ca
 <details>
 <summary><b>Does it collect any data?</b></summary>
 
-You choose whether to share anonymous usage data. You can make that choice during the onboarding, or change it any time with `/show-your-work`. It never collects any sensitive data whatsoever. The details are in the [Privacy policy](PRIVACY.md).
+No usage data or telemetry is collected or sent. The details are in the [Privacy policy](PRIVACY.md).
 
 </details>
 
@@ -211,7 +212,6 @@ It keeps these files:
 
 Once a day it reads the plugin's latest version number from `raw.githubusercontent.com`.
 
-If Usage data is set to share in `/show-your-work`, it sends anonymous usage counts to `us.i.posthog.com`. These are event names and counts, plus the plugin and Claude Code versions, your terminal, your OS and whether ffmpeg is installed, under a random install id. They never include file names, paths, prompts, anything you type or your IP address. The key in the code is PostHog's public key, which can only send events.
 
 Inside Claude Code, it uses these hooks:
 
@@ -219,14 +219,14 @@ Inside Claude Code, it uses these hooks:
 - `prompt.submit` closes the settings when you send a message and remembers the names of images you paste, so `/img` can find them. Your message isn't changed.
 - `tool.call` handles the plugin's own `show_image`, `show_video`, `show_html`, `show_audio` and `show_document` tools. It never touches other tools.
 - `command.run` runs `/img`, `/page`, `/audio`, `/doc` and `/show-your-work`. Right after you install, it runs `/show-your-work tour` once to show you around.
-- `ui.render` draws the plugin's player, notices, settings and tour.
-- `session.start` and `session.end` set up the temp folder and terminal at the start, and send any waiting usage counts at the end. Inside tmux they also start and stop the picture pass-through for the plugin's pane (see [Terminals](#terminals)).
+- `ui.render` draws the plugin's player, notices, settings and tour. It also reads the output of other tools' calls (an MCP server's chart, say) for image blocks and draws them under the call's row; nothing is stored or sent, and it never changes what Claude receives.
+- `session.start` and `session.end` set up the temp folder and terminal at the start. Inside tmux they also start and stop the picture pass-through for the plugin's pane (see [Terminals](#terminals)).
 
 </details>
 
 ## Feedback
 
-To report a bug or suggest a change, [open an issue](https://github.com/iamumeransari/claude-show-your-work/issues).
+To report a bug or suggest a change, [open an issue](https://github.com/jeffzyliu/claude-show-your-work/issues).
 
 ## For developers
 

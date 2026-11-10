@@ -1,13 +1,13 @@
 import { expect, test } from 'claude-code/testing'
 
 import { wrapWords, pagesOf, fit, cellOf, frameWidth, paneSize, layoutOf, targetBox, drawBox, pixelsFor, sizeFor, tabLabel } from '../hooks/layout'
-import { isInstalledCopy } from '../hooks/telemetry'
+import { isInstalledCopy } from '../hooks/updater'
 import { isAtLeast } from '../hooks/setup'
 import { STOPS } from '../hooks/tour'
 import { settings, state } from '../hooks/state'
 import { isKept, rawSizeOf, readsAnyFile, anchors, mapTime, align, matchOf, expand, frameFile, pairHeightOf, sameMoment, sampleRate, aheadOf, strideFor, spreadMatch, leadFrom, shiftTimes, keyOf, looseName, pngDims } from '../hooks/media'
 import { parseShown, timesThatMean, versionsOf, noteOf, handleOf } from '../hooks/history'
-import { liveChange, inClipOrder, barChunks, changeAt, qaTotals, checkDiff, resultWords, resumeCommand, isScratch, toolLine, urlAt, playWord, openFailure, causeOf, profileOf, withoutPicturesLine, copyWidthFor, bestCopy, anyTerminalReads, terminalOf, pngSource } from '../hooks/player'
+import { liveChange, inClipOrder, barChunks, changeAt, qaTotals, checkDiff, resultWords, resumeCommand, isScratch, toolLine, toolName, urlAt, playWord, openFailure, causeOf, profileOf, withoutPicturesLine, copyWidthFor, bestCopy, anyTerminalReads, terminalOf, pngSource } from '../hooks/player'
 
 test('a wide image fills the width at half-height rows', () => {
   expect(fit(1920, 1080, 100, 40)).toEqual({ columns: 100, rows: 29 })
@@ -127,9 +127,15 @@ test('temp files are scratch, finished work is not', () => {
 })
 
 test('the call row is one short line', () => {
-  const line = toolLine('mcp__show-your-work__show_video', { path: '/tmp/x/qa.webm', title: 'Agent QA', compare: '/tmp/b.webm', compare_label: 'Live', checks: [1, 2, 3] }, false)
-  expect(line).toBe('▶ Video · Agent QA · vs Live · 3 checks')
-  expect(toolLine('mcp__show-your-work__show_image', { path: '/a/b/shot.png' }, true)).toBe('▣ Loading image · shot.png')
+  const line = toolLine('mcp__show-your-work__show_video', { path: '/tmp/x/qa.webm', title: 'Agent QA', compare: '/tmp/b.webm', compare_label: 'Live', checks: [1, 2, 3] })
+  expect(line).toEqual({ name: 'show_video', info: 'Agent QA - vs Live - 3 checks' })
+  expect(toolLine('mcp__show-your-work__show_image', { path: '/a/b/shot.png' })).toEqual({ name: 'show_image', info: 'shot.png' })
+})
+
+test('a tool is named as Claude Code names it: server - tool, this plugin\'s bare', () => {
+  expect(toolName('mcp__dofile__run_do')).toBe('dofile - run_do')
+  expect(toolName('mcp__claude_ai_Gmail__create_draft')).toBe('claude_ai_Gmail - create_draft')
+  expect(toolName('mcp__show-your-work__show_html')).toBe('show_html')
 })
 
 test('open page follows the latest check with a url', () => {
@@ -365,8 +371,8 @@ test('versions compare by number, not by text', () => {
   expect(isAtLeast('2.1.296-dev', '2.1.295')).toBe(true)
 })
 
-test('only an installed copy sends usage data, never one loaded from a folder', () => {
-  expect(isInstalledCopy('/Users/a/.claude/plugins/cache/iamumeransari/show-your-work/0.6.0')).toBe(true)
+test('only an installed copy counts as installed, never one loaded from a folder', () => {
+  expect(isInstalledCopy('/Users/a/.claude/plugins/cache/jeffzyliu/show-your-work/0.6.0')).toBe(true)
   expect(isInstalledCopy('/Users/a/claude-mods/claude-show-your-work')).toBe(false)
   expect(isInstalledCopy('/Users/a/Client Sites/show-your-work')).toBe(false)
 })

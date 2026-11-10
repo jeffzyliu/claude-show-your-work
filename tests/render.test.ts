@@ -519,3 +519,69 @@ test('a tall, narrow picture still gets Copy path when the window has room', asy
   const keys = nodesOf(await mounted.drawn(), 'Button').map(b => b.props.key)
   expect(keys.includes('copy')).toBe(true)
 })
+
+test('several pictures draw as a carousel: a picker, and pressing a number switches the picture', async $ => {
+  const one = (n: number) => ({ kind: 'image', path: `/tmp/c${n}.png`, source: `/tmp/c${n}.png`, width: 1200, height: 800, title: `Shot ${n}`, generation: n })
+  const carousel = { ...one(1), carousel: [one(1), one(2), one(3)] }
+  for (const columns of [160, 70]) {
+    const output = `Shown.\nshow-your-work:${JSON.stringify(carousel)}`
+    const target = {
+      plugin: 'show-your-work', surface: 'terminal', component: 'ToolResult', requestId: `car-${columns}`,
+      props: { tool_use_id: `car-${columns}`, tool: 'mcp__show-your-work__show_image', output, isErrored: false },
+      viewport: { columns, rows: 50 },
+    } as any
+    const m = await $.ui.mount(target) as any
+    const first = (await m.drawn()) as any
+    expect(first.props.width).toBeLessThanOrEqual(columns - 4)
+    const before = JSON.stringify(first)
+    expect(before.includes('"carousel-2"')).toBe(true)
+    expect(before.includes('Shot 1')).toBe(true)
+    await m.press({ key: 'carousel-2' })
+    await m.redraw()
+    const after = JSON.stringify(await m.drawn())
+    expect(after.includes('Shot 3')).toBe(true)
+    expect(after.includes('Shot 1')).toBe(false)
+    await m.press({ key: 'carousel-next' })
+    await m.redraw()
+    // Wraps from the last back to the first.
+    expect(JSON.stringify(await m.drawn()).includes('Shot 1')).toBe(true)
+  }
+})
+
+test('a row draws every picture as its own image with its own buttons, and wraps when narrow', async $ => {
+  const one = (n: number) => ({ kind: 'image', path: `/tmp/r${n}.png`, source: `/tmp/r${n}.png`, width: 1200, height: 800, title: `Shot ${n}`, generation: n })
+  const row = { ...one(1), title: '4 images', isRow: true, carousel: [one(1), one(2), one(3), one(4)] }
+  const lineCount = (drawn: unknown) => JSON.stringify(drawn).split('"line-').length - 1
+  const seen: number[] = []
+  for (const columns of [200, 70]) {
+    const target = {
+      plugin: 'show-your-work', surface: 'terminal', component: 'ToolResult', requestId: `row-${columns}`,
+      props: { tool_use_id: `row-${columns}`, tool: 'mcp__show-your-work__show_image', output: `Shown.\nshow-your-work:${JSON.stringify(row)}`, isErrored: false },
+      viewport: { columns, rows: 50 },
+    } as any
+    const m = await $.ui.mount(target) as any
+    const drawn = await m.drawn()
+    const text = JSON.stringify(drawn)
+    expect(drawn.props.width).toBeLessThanOrEqual(columns - 4)
+    expect(nodesOf(drawn, 'Image').length).toBe(4)
+    for (let n = 0; n < 4; n++) {
+      expect(text.includes(`Shot ${n + 1}`)).toBe(true)
+      for (const key of [`view-${n}`, `keep-${n}`, `copy-${n}`]) expect(text.includes(`"${key}"`)).toBe(true)
+    }
+    // No picker: every picture is already on screen.
+    expect(text.includes('carousel-next')).toBe(false)
+    seen.push(lineCount(drawn))
+  }
+  // Narrower windows wrap onto more lines.
+  expect(seen[1]!).toBeGreaterThan(seen[0]!)
+})
+
+test('another tool\'s result with no image blocks is left alone', async $ => {
+  const target = {
+    plugin: 'show-your-work', surface: 'terminal', component: 'ToolResult', requestId: 'other-text',
+    props: { tool_use_id: 'other-text', tool: 'mcp__dofile__plot', output: [{ type: 'text', text: 'done' }], isErrored: false },
+    viewport: { columns: 120, rows: 40 },
+  } as any
+  const m = await $.ui.mount(target) as any
+  expect(JSON.stringify(await m.drawn()).includes('show-your-work')).toBe(false)
+})

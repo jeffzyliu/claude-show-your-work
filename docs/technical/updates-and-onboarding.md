@@ -6,17 +6,16 @@
 - Once a day (`updateCheckedAt`), the updater fetches `.claude-plugin/plugin.json` from the channel's branch. If the version is newer it runs `claude plugin marketplace update` and `claude plugin update`; the new version loads in the next session. Failures say nothing to the user.
 - An install pinned to a tag stays on it. A branch that doesn't exist on GitHub yet: stay where it is.
 - **Switching channel** moves the marketplace to `url#branch` and reinstalls (`MOVE_SH`). It runs detached (`DETACH`), so quitting Claude Code halfway can't leave the plugin uninstalled. If the new branch fails, the old source goes back, retried twice.
-- **Every check is reported** as `update_check` with how it ended: `current`, `update`, `pending`, `folder` (loaded from a folder, not installed), `pinned`, `offline` or `no_cli`. Added in 0.7.0 after PostHog showed many active installs stuck on old versions (0.5.14, 0.5.16, 0.6.1, 0.6.3) with no `update_failed` events: the checks were failing before they could report anything.
+- **Every check ends in one of:** `current`, `update`, `pending`, `folder` (loaded from a folder, not installed), `pinned`, `offline` or `no_cli`. Added in 0.7.0 after PostHog showed many active installs stuck on old versions (0.5.14, 0.5.16, 0.6.1, 0.6.3) with no `update_failed` events: the checks were failing before they could report anything.
 - **Claude Code's CLI is found through the login shell** first (`state.claudePath`, the same way as ffmpeg), then the usual locations (`CLAUDE_BINARIES`, including `~/.npm-global/bin` and `/usr/bin`). Hooks run with a thin `PATH`, so a bare `claude` often isn't found.
 - **A check that couldn't run (`offline`, `no_cli`) doesn't count for the day,** so the next session tries again instead of waiting 24 hours.
 - Off with `SHOW_YOUR_WORK_AUTO_UPDATE=0` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`. Update choices saved by earlier versions (`consent` in 0.5.12, `updatesOff` in 0.5.16) are no longer read; their usage data choice (`statsOff`, `consent.stats`) carries over (`earlierNo`).
 
 ## Settings
 
-- `/show-your-work` opens the settings pane: update channel, usage data and picture size (`SETTINGS` in `state.ts`). Choices are plain ● / ○ rows, never On/Off.
+- `/show-your-work` opens the settings pane: update channel and picture size (`SETTINGS` in `state.ts`). Choices are plain ● / ○ rows, never On/Off.
 - Saved in the plugin store under `settings`.
 - **`ensureSettings` reads the saved settings once per plugin load,** from the `ToolResult` and `/img` render paths as well as session start. `/reload-plugins` resets module state and may not re-run `session.start`, so before this a reload drew every picture as Standard until the next restart.
-- Changing a setting records it on the anonymous PostHog profile (`update_channel`, `picture_size`); a picture size change also redraws players on screen.
 - `/show-your-work tour` starts the tour. There is no other settings command (0.5.16's `/show-your-work-settings` was dropped in 0.6.0).
 
 ## Welcome and tour

@@ -43,7 +43,7 @@ class Terminal:
         self.screen = pyte.Screen(columns, rows) if pyte else None
         self.stream = pyte.ByteStream(self.screen) if pyte else None
         env = dict(os.environ, TERM_PROGRAM='ghostty', TERM='xterm-ghostty', COLORTERM='truecolor', SHOW_YOUR_WORK_DEBUG='1')
-        args = ['claude', '--plugin-dir', ROOT, '--settings', '{"enabledPlugins":{"show-your-work@iamumeransari":false}}']
+        args = ['claude', '--plugin-dir', ROOT, '--settings', '{"enabledPlugins":{"show-your-work@jeffzyliu":false}}']
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(ROOT)
