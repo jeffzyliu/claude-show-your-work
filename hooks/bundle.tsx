@@ -5315,7 +5315,8 @@ const PANE = 'show-your-work'
 const TOOLS = ['show_image', 'show_video', 'show_html', 'show_audio', 'show_document'].map(t => `mcp__show-your-work__${t}`)
 // Screenshots and recordings made only to be shown go to the temp folder, so
 // they don't pile up in the project; the history keeps its own copy.
-const SCRATCH_NOTE = 'Save screenshots and recordings you make to show here in a temporary folder, such as $TMPDIR or /tmp, not in the project. Save them in the project only when the user asks to keep them, or when the project already has a folder for them, such as one for test screenshots.'
+// Said once, in the session hint, not in every tool description.
+const SCRATCH_NOTE = ' Save screenshots and recordings to $TMPDIR or /tmp, not the project, unless asked to keep them.'
 // What can be shown at all: anything else is refused before it is copied.
 const MEDIA = /\.(png|jpe?g|webp|gif|tiff?|heic|heif|bmp|avif|mp4|mov|m4v|webm|mkv|avi)$/i
 // The settings pane. A hook's filter is read from a const in this file, so its
@@ -5355,66 +5356,43 @@ async function picturesOf($: EngineInterface, tool: string, id: string, blocks: 
   return { ...items[0]!, carousel: items, ...(items.length <= 4 ? { isRow: true, title: label } : {}) }
 }
 
+// Schemas are kept minimal: they are sent to Claude on every turn a tool is loaded.
+// The handler still accepts pr, url, label, compare_label, changes_title, versions and the
+// finer fields (detail, passed, total, step); they are just not advertised.
+const STR = { type: 'string' }
 const CHECKS = {
   type: 'array',
-  description: 'Checks actually run, each measured, never eyeballed: { name (one full sentence saying what was verified, with real values), ok, at? (seconds into the video when it resolved), step? (the plan step, or "Extras"), expected? and actual? (required when ok is false: concrete values) }',
-  items: {
-    type: 'object',
-    properties: {
-      name: { type: 'string' }, ok: { type: 'boolean' }, at: { type: 'number' }, url: { type: 'string' },
-      step: { type: 'string' }, expected: { type: 'string' }, actual: { type: 'string' }, detail: { type: 'string' },
-    },
-    required: ['name', 'ok'],
-  },
+  description: 'Checks run: name, ok, at (seconds), expected/actual when failed',
+  items: { type: 'object', properties: { name: STR, ok: { type: 'boolean' }, at: { type: 'number' }, expected: STR, actual: STR }, required: ['name', 'ok'] },
 }
+const CHANGES = {
+  type: 'array',
+  description: 'What changed: title, at (seconds)',
+  items: { type: 'object', properties: { title: STR, at: { type: 'number' } }, required: ['title'] },
+}
+const SUMMARY = {
+  type: 'array',
+  description: 'QA lines you ran, up to 3',
+  items: { type: 'object', properties: { label: STR, ok: { type: 'boolean' } }, required: ['label', 'ok'] },
+}
+const object = (properties: Record<string, unknown>, required: string[] = ['path']) => ({ type: 'object', properties, required })
+const PATH = { type: 'string', description: 'Absolute path' }
+const TITLE = { type: 'string', description: 'Short caption' }
+const PREVIOUS = { type: 'string', description: '#id of the version this revises' }
 
-const TOOL_INPUT = {
-  type: 'object',
-  properties: {
-    path: { type: 'string', description: 'Absolute path' },
-    title: { type: 'string', description: 'Short caption' },
-    pr: { type: 'string', description: 'PR URL or number' },
-    url: { type: 'string', description: 'The page shown; adds Open page' },
-    changes: {
-      type: 'array',
-      description: 'What changed: { title, detail?, at? (seconds), url? }, in clip order',
-      items: { type: 'object', properties: { title: { type: 'string' }, detail: { type: 'string' }, at: { type: 'number' }, url: { type: 'string' } }, required: ['title'] },
-    },
-    summary: {
-      type: 'array',
-      description: 'QA in up to 3 lines: { label, ok, passed?, total? }',
-      items: { type: 'object', properties: { label: { type: 'string' }, ok: { type: 'boolean' }, passed: { type: 'number' }, total: { type: 'number' } }, required: ['label', 'ok'] },
-    },
-    checks: CHECKS,
-    compare: { type: 'string', description: 'Path to the before version' },
-    compare_checks: { ...CHECKS, description: 'The same checks on the before side' },
-    changes_title: { type: 'string', description: 'Heading for the changes list when not "What changed", e.g. "Video structure"' },
-    previous: { type: 'string', description: '#id of the version this revises' },
-    versions: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, note: { type: 'string' } }, required: ['path'] }, description: 'Earlier unshown versions of this work, oldest first: { path, note }' },
-    label: { type: 'string', description: 'Name for this side if the user asks (default "Updated")' },
-    compare_label: { type: 'string', description: 'Name for the before side if the user asks (default "Original")' },
-  },
-  required: ['path'],
-}
-
-// A picture needs no timed checks, play button or custom list heading.
-const IMAGE_INPUT = {
-  ...TOOL_INPUT,
-  properties: Object.fromEntries(Object.entries(TOOL_INPUT.properties).filter(([k]) => !['checks', 'compare_checks', 'changes_title'].includes(k))),
-}
-
-// show_image alone takes several pictures: a carousel (the default) or one row.
-const SHOW_IMAGE_INPUT = {
-  ...IMAGE_INPUT,
-  properties: {
-    ...IMAGE_INPUT.properties,
-    path: { type: 'string', description: 'Absolute path of one image' },
-    paths: { type: 'array', items: { type: 'string' }, description: 'Several images (up to 12) instead of path: absolute paths' },
-    layout: { type: 'string', enum: ['carousel', 'row'], description: 'For paths: "carousel" (default) shows one at a time with a picker; "row" shows them all at once, separate images that wrap onto new lines' },
-    titles: { type: 'array', items: { type: 'string' }, description: 'One short title for each of paths, in order (carousel and row), or leave out and each is named for its file. About 20 characters, at most 40. Say what sets an image apart from the others, such as "Editor · dark", and skip what they share. The count must match paths.' },
-  },
-  required: [],
-}
+const PLAIN_INPUT = object({ path: PATH, title: TITLE })
+const AUDIO_INPUT = object({ path: PATH, title: TITLE, changes: CHANGES, checks: CHECKS })
+const VIDEO_INPUT = object({
+  path: PATH, title: TITLE, changes: CHANGES, checks: CHECKS, summary: SUMMARY, previous: PREVIOUS,
+  compare: { type: 'string', description: 'Before version' }, compare_checks: CHECKS,
+})
+const SHOW_IMAGE_INPUT = object({
+  path: PATH, title: TITLE, changes: CHANGES, summary: SUMMARY, previous: PREVIOUS,
+  compare: { type: 'string', description: 'Before image' },
+  paths: { type: 'array', items: STR, description: 'Several images (max 12) instead of path' },
+  layout: { type: 'string', enum: ['carousel', 'row'] },
+  titles: { type: 'array', items: STR, description: 'One short title per path' },
+}, [])
 const MAX_PICTURES = 12
 // A title in a row is cut to its picture's width; this keeps one long one from taking over.
 const TITLE_MAX = 40
@@ -5598,38 +5576,35 @@ export const register: Register = on => {
     })
     await $.tool.register({
       name: 'show_document',
-      description: `Shows a local document inline in the terminal, as pages the person can turn through. Accepts PDF, Markdown (.md or .markdown) and Mermaid (.mmd or .mermaid); Mermaid fenced blocks in Markdown become diagrams. Use it when the user asks to see or read a report, a PDF, a Markdown document or a diagram you wrote. The person sees the pages; you do not. Pass path and an optional title. There is no playback: Previous/Next turn pages. PDF needs poppler (pdftoppm, pdfinfo); Markdown and Mermaid also need Chrome or Chromium, with Mermaid shipped offline. ${SCRATCH_NOTE}`,
-      inputSchema: IMAGE_INPUT,
+      description: 'Shows a PDF, Markdown or Mermaid (.mmd) file inline as pages. Use when the user asks to see or read a report, document or diagram.',
+      inputSchema: PLAIN_INPUT,
       isDeferred: false,
     })
     // Only with a browser to render pages: without one, Claude screenshots
     // with Playwright and uses show_image.
     if (state.chrome) await $.tool.register({
       name: 'show_html',
-      description: 'Shows a local HTML file as a static preview inline in the terminal, using Chrome or Chromium. Accepts .html and .htm files. The preview is a fixed 1280 by 800 viewport, not an interactive page: scrolling, forms and sound work only after the person chooses Open page in their browser. Use it for HTML reports, page designs and small artifacts you have made. Pass path and an optional title; changes, summary and previous work as for show_image. No URL navigation. The file may execute scripts while Chrome renders it; use only pages you intend to render. The person sees the preview; you do not.',
-      inputSchema: IMAGE_INPUT,
-      isDeferred: false,
+      description: 'Shows a local .html file as a static 1280x800 preview inline. Use for reports, page designs and small artifacts.',
+      inputSchema: PLAIN_INPUT,
+      isDeferred: true,
     })
     await $.tool.register({
       name: 'show_audio',
-      description:
-        `Plays an audio file to the user, inline in their terminal: the whole clip's waveform with a playhead that follows playback, and Play, scrubbing and skips like the video player. Accepts MP3 and WAV.\n\nUse it without being asked whenever the user asks to hear something: a sound effect, a voice memo, music, a generated track or a text-to-speech clip you have made. Sound plays once the person presses Play, on the machine's speakers.\n\nPass \`path\` and an optional \`title\`; \`changes\` with \`at\` (the second it appears) and \`checks\` mark moments in the clip like in a video. The person hears it; you do not.\n\n${SCRATCH_NOTE}`,
-      inputSchema: TOOL_INPUT,
-      isDeferred: false,
+      description: 'Plays an MP3 or WAV file inline. Use when the user asks to hear something. changes and checks mark moments in the clip.',
+      inputSchema: AUDIO_INPUT,
+      isDeferred: true,
     })
     await $.tool.register({
       name: 'show_image',
-      description:
-        `Shows an image file to the user, inline in their terminal. Accepts PNG, JPEG, WebP, GIF and TIFF.\n\nUse it without being asked whenever you have made or changed something visual, before you say the work is done: screenshot a page or component with headless Playwright, or show a design concept, chart, slide or generated image. Do this instead of asking the user to open a file or a localhost URL. Don't use it when nothing visual changed.\n\nWhen the image shows work you changed, also pass \`changes\` (what you changed, a few words each) and \`compare\` (an image of the same view from before the change), so the user can switch between Original, Updated and Compare. To show several images at once pass \`paths\` instead of \`path\`: by default they become a carousel the user steps through (give each a short name in \`titles\`); with \`layout: \"row\"\` they are all shown at once as separate images that wrap onto new lines (give each a short name in \`titles\`), each with its own View, Save and Copy path. A carousel or row has no compare or history. Pass \`summary\` only for checks you actually ran. When you show a new version of something you showed earlier, pass \`previous\` with its #id so both stay in the same history.\n\nThe image goes to the user's screen, not to you. Read the file yourself only if you need to check it.\n\n${SCRATCH_NOTE}`,
+      description: 'Shows images inline in the terminal (PNG, JPEG, WebP, GIF, TIFF). Use unasked after any visual work, before saying it is done, instead of asking the user to open a file. For changed work pass changes and compare (the before image). paths shows several as a carousel, or a row with layout "row". The user sees it; you do not.',
       inputSchema: SHOW_IMAGE_INPUT,
       isDeferred: false,
     })
     await $.tool.register({
       name: 'show_video',
-      description:
-        `Plays a video file to the user, inline in their terminal, in a player that starts on its own. Accepts MP4, MOV, WebM and GIF.\n\nUse it without being asked to show recordings: after building or fixing an interactive feature, record a headless Playwright run that clicks through it and play that, rather than asking the user to try it themselves. Also use it for animations and for ad or film cuts you have made.\n\nWhen the video shows work you changed, pass \`changes\`, each with \`at\` (the second it appears), and \`checks\` for what you tested, also with \`at\`. For a fix, record the same steps on the old version and pass that file as \`compare\` with its own \`compare_checks\`; the two play side by side, in sync. Pass \`summary\` only for checks you actually ran, and \`previous\` with an earlier #id when this is a new version of something you showed.\n\nKeep clips short: they are played as frames, at most 900 at up to 12 per second. You do not see the video.\n\n${SCRATCH_NOTE}`,
-      inputSchema: TOOL_INPUT,
-      isDeferred: false,
+      description: 'Plays a video inline (MP4, MOV, WebM, GIF; keep it short). Use unasked after building or fixing an interactive feature: record a headless Playwright run. Pass changes and checks with at (seconds); for a fix, compare is the before clip, with compare_checks. The user sees it; you do not.',
+      inputSchema: VIDEO_INPUT,
+      isDeferred: true,
     })
 
     return started
@@ -6032,8 +6007,8 @@ export const register: Register = on => {
 function hintNow() {
   // HTML pages are named only when a browser to render them was found.
   const audio = " When the user asks to hear something, or you've made audio, play it with show_audio (MP3 or WAV). When the user asks to see or read a report, PDF, Markdown document or Mermaid diagram, show it with show_document (PDF, MD or MMD); the person can turn its pages."
-  if (state.canImage && !state.chrome) return `This terminal shows pictures, videos, audio and documents inline. After visual work, screenshot or record it and show it with show_image or show_video before you say you're done, instead of telling the user to open a file or localhost. For a UI fix, show before and after.${audio}`
-  if (state.canImage) return `This terminal shows pictures, videos, HTML pages, audio and documents inline. After visual work, show it instead of telling the user to open a file or localhost: an image or screenshot with show_image, a recording with show_video, an HTML file with show_html, each before you say you're done. For a UI fix, show before and after.${audio}`
+  if (state.canImage && !state.chrome) return `This terminal shows pictures, videos, audio and documents inline. After visual work, screenshot or record it and show it with show_image or show_video before you say you're done, instead of telling the user to open a file or localhost. For a UI fix, show before and after.${audio}${SCRATCH_NOTE}`
+  if (state.canImage) return `This terminal shows pictures, videos, HTML pages, audio and documents inline. After visual work, show it instead of telling the user to open a file or localhost: an image or screenshot with show_image, a recording with show_video, an HTML file with show_html, each before you say you're done. For a UI fix, show before and after.${audio}${SCRATCH_NOTE}`
   const why = cantDraw(state.drawCause, 'it', 'picture', state.sessionId).claude.replace(/, so the person saw a notice instead of it\./, '.')
   return `show-your-work: pictures, videos, HTML pages, audio and documents can't draw in this session (${why}) Anything shown with show_image, show_video, show_html, show_audio or show_document was not seen: the person saw a notice instead. Don't say they saw it.`
 }
